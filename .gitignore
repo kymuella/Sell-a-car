@@ -1,0 +1,11 @@
+# Project place file
+/roblox stuff.rbxlx
+
+# Roblox Studio lock files
+/*.rbxlx.lock
+/*.rbxl.lock
+
+sourcemap.json
+
+# Separate clone of github.com/kymuella/Sell-a-car, tracked by its own repo
+/Sell-a-car/
