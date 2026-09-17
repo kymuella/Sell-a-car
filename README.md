@@ -102,6 +102,38 @@ Pressing throttle against the direction you are already travelling brakes
 instead of changing gear; below a couple of studs per second it pulls away the
 other way.
 
+Whoever sits in a car disappears while they are in it -- every part, accessory
+and face -- so nothing pokes out through the bodywork. They come back exactly as
+they were when they get out.
+
+### Barn finds: steal, deliver, restore
+
+Rusted cars sit in barns around the map. Steal one, drive it to the restoration
+garage, and after it has been through the workshop it is yours.
+
+- **Barns.** Every part tagged `BarnSpot` is a barn's parking space: its CFrame
+  is where the car stands, facing out of the door. `BarnService` keeps a Rusted
+  car at each one -- the spot's `Car` attribute if it has one, otherwise a
+  catalog car rolled from `CarConfig.Barns.TierWeights`. There are seven in
+  `Workspace.Map.Barns`, on Stages 1 and 3-5.
+- **Stealing.** A barn find drives like a wreck (see the Rusted condition below)
+  and is labelled "BARN FIND" in the world. While you are in one, a banner shows
+  what you have taken and how far the garage is, and the drop-off is marked
+  through walls.
+- **Delivering.** Drive it into a part tagged `GarageDropOff` --
+  `Workspace.Map.RestorationGarage` has one behind the orange floor markings.
+  The car is taken away and the job starts. Anyone driving it can deliver it, so
+  a car can be stolen off you on the way.
+- **Restoring.** Each job runs through **retrieval** and then **recuperation**
+  (seconds per catalog tier in `CarConfig.Restoration`), counting down in the
+  garage screen's restoration bay. When it finishes the car is added to your
+  garage and you can spawn it like any other.
+- **Repeats.** Delivering a car you already own, or already have in the bay,
+  sells it for scrap instead (10% of its price, at least $1,000).
+- **Restocking.** A robbed barn gets another car after
+  `CarConfig.Barns.RespawnSeconds`, and a barn find left empty away from its barn
+  is towed back.
+
 ### How it fits together
 
 | File | Role |
@@ -111,8 +143,11 @@ other way.
 | [src/shared/Car/CarPhysics.luau](src/shared/Car/CarPhysics.luau) | The arcade raycast physics: springs, traction and steering, the same for every car |
 | [src/shared/Car/CarCatalog.luau](src/shared/Car/CarCatalog.luau) | The shop's list of cars, prices and stats |
 | [src/server/CarService.luau](src/server/CarService.luau) | Spawns cars, seats players, hands the driver control, holds empty cars parked, lights, un-flips |
-| [src/server/PlayerDataService.luau](src/server/PlayerDataService.luau) | Cash, owned cars, and the shop, garage and teleport requests |
+| [src/server/BarnService.luau](src/server/BarnService.luau) | Keeps rusted cars in the barns, spots deliveries at the garage, restocks and tows |
+| [src/server/CharacterVisibility.luau](src/server/CharacterVisibility.luau) | Hides a character while they are in a car, and puts them back |
+| [src/server/PlayerDataService.luau](src/server/PlayerDataService.luau) | Cash, owned cars, the restoration bay, and the shop, garage and teleport requests |
 | [src/client/CarController.luau](src/client/CarController.luau) | Reads the driver's input, runs the physics on it locally and relays it to the server; stands you beside the car when you get out |
+| [src/client/BarnFindHUD.luau](src/client/BarnFindHUD.luau) | The stolen-car banner and the waypoint to the garage drop-off |
 | [src/client/CarVisuals.luau](src/client/CarVisuals.luau) | Moves every car's wheels (suspension, steering, rolling) and brake lights, on every client |
 | [src/client/Speedometer.luau](src/client/Speedometer.luau) | The speed dial, shown only while you are in a car |
 | [src/client/GameUI.luau](src/client/GameUI.luau) | The shop, garage and cardex screens |
@@ -137,6 +172,23 @@ lights.
 belongs to the server, which runs the same physics to hold it parked. The
 server also keeps seating, lights, and putting a flipped or lost car back where
 it spawned.
+
+### Conditions
+
+Besides "Restored" -- the car as its template made it -- a car can be built in
+any condition from `CarConfig.Conditions`. There is one, `Rusted`, used for barn
+finds, and it is worked out from the same template rather than a second model,
+so it fits every car in the game:
+
+- paint and bare metal corrode (Roblox's `CorrodedMetal`, which needs no UV maps
+  and so suits imported meshes), glass goes grimy, everything else fades under
+  dirt
+- the lamps are dead and the car sits lower, its wheels pushed up into the arches
+- its stats are multiplied down: a rusted car is slow, slack and hard to steer
+- its prompt says "Steal" instead of "Drive"
+
+`CarService.spawnCar(name, origin, snap, paint, "Rusted")` builds one, and
+`addToStudio("Porsche", "Rusted")` puts a stand-in in Studio to look at.
 
 ### The Porsche
 
@@ -191,10 +243,15 @@ has the command). Parts are matched by name, so keep the names it gives them.
   can drive up onto characters.
 - Empty cars are simulated by the server every frame (a ray per wheel), which is
   fine for dozens but worth watching at hundreds.
-- Tall hair and hats poke through the Porsche's roof; the head itself fits.
 - About 83k triangles per Porsche. Fine for a handful, but worth watching if a
   server spawns dozens.
 - No engine sound -- that needs an audio asset ID, which the repo has none of.
+- Only the Porsche has a model: the other catalog cars are built from its meshes
+  until theirs are imported, so they all look alike.
+- Player data lives in memory only. Cash, owned cars and restorations in progress
+  are lost when the server shuts down.
+- Spawning a car from the garage puts it 16 studs in front of you without
+  checking what is there, so it can land on a wall or a roof.
 
 ## Blender MCP
 

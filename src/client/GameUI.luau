@@ -1048,10 +1048,11 @@ function renderGarageContent()
 		addStroke(specBox, THEME.Stroke, THEME.StrokeTrans)
 
 		local function addBoxSpec(col: number, row: number, name: string, val: string)
-			local x = col == 1 and 16 or 0.52
+			-- column 1 sits 16 px in from the left; column 2 starts at 52% across
+			local xScale, xOffset = if col == 1 then 0 else 0.52, if col == 1 then 16 else 0
 			local y = row == 1 and 12 or 50
 			make("TextLabel", {
-				Position = UDim2.new(x, 0, 0, y),
+				Position = UDim2.new(xScale, xOffset, 0, y),
 				Size = UDim2.new(0.45, 0, 0, 14),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
@@ -1062,7 +1063,7 @@ function renderGarageContent()
 				Parent = specBox,
 			})
 			make("TextLabel", {
-				Position = UDim2.new(x, 0, 0, y + 16),
+				Position = UDim2.new(xScale, xOffset, 0, y + 16),
 				Size = UDim2.new(0.45, 0, 0, 16),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamBold),
