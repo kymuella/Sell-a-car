@@ -32,6 +32,9 @@ spawn into `Workspace.Cars` on startup; walk up to one and press **E** (or hold
 The car is built at 1.4x life size (`CarConfig.Scale`): at true scale a seated
 Roblox character's head goes through a 911's roof.
 
+While you sit in a car, driving or riding along, a speedometer shows the car's
+speed in km/h (`R` when reversing). It hides as soon as you are on foot.
+
 ### Controls
 
 | Input | Keyboard | Gamepad |
@@ -54,6 +57,7 @@ other way.
 | [src/shared/Car/CarDrive.luau](src/shared/Car/CarDrive.luau) | The drive maths: input to motor and steering values, run by both ends |
 | [src/server/CarService.luau](src/server/CarService.luau) | Spawns the cars, seats players, lights, parks and un-flips them |
 | [src/client/CarController.luau](src/client/CarController.luau) | Reads the driver's input, applies it locally and relays it to the server; stands you beside the door when you get out |
+| [src/client/Speedometer.luau](src/client/Speedometer.luau) | The speed dial, shown only while you are in a car |
 | [blender models/porsche/export_porsche.py](blender%20models/porsche/export_porsche.py) | Turns the Porsche `.blend` into `Porsche.fbx` |
 
 The rear wheels hang off the chassis on `HingeConstraint` motors. The front
