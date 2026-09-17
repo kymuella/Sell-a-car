@@ -1,15 +1,20 @@
 --[[
-	CarController -- the drive script: turns the driver's input into motor and
-	steering values on the car's constraints.
+	CarController -- the drive script: reads the driver's input, applies it to the
+	car locally, and relays it to the server.
 
-	This runs on the driver's client on purpose. CarService hands the driver
-	network ownership of the car's parts, so the constraint values set here are
-	simulated locally and the resulting motion replicates out to everyone else.
-	That is what makes the car feel immediate rather than laggy.
+	The local apply is what makes the car feel immediate: CarService hands the
+	driver network ownership of the car's parts, so this client's simulation is
+	the one that counts, and the constraint values written here take effect at
+	once. The relay is the safety net -- the server runs the same CarDrive maths
+	on the same input, so the car still drives if ownership has not transferred.
+
+	Seating is detected with Humanoid.Seated, the event Roblox fires on both ends
+	when a character sits down. (Watching Humanoid.SeatPart for changes is the
+	obvious alternative and is not reliable on the client.)
 
 	Controls: W/S or the triggers to drive, A/D to steer, LeftShift or B for the
-	handbrake, Space to hop out (the default seat behaviour, left alone on
-	purpose).
+	handbrake, Space to hop out -- that last one is the default seat behaviour,
+	left unbound on purpose.
 ]]
 
 local ContextActionService = game:GetService("ContextActionService")
@@ -17,23 +22,18 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
-local CarConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car"):WaitForChild("CarConfig"))
+local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
+local CarConfig = require(CarFolder.CarConfig)
+local CarDrive = require(CarFolder.CarDrive)
 
 local DRIVE = CarConfig.Driving
-
--- Wheel speeds are angular: studs/second over the radius gives radians/second.
-local MAX_FORWARD_SPIN = DRIVE.MaxSpeed / CarConfig.Dimensions.WheelRadius
-local MAX_REVERSE_SPIN = DRIVE.MaxReverseSpeed / CarConfig.Dimensions.WheelRadius
-
-local BRAKE_LIGHT_BRIGHTNESS = 6
-local IDLE_LIGHT_BRIGHTNESS = 1.2
+local SEND_INTERVAL = 1 / DRIVE.InputSendRate
 
 local player = Players.LocalPlayer
 
 local CarController = {}
 
--- Raw input, written by the action bindings. Held as one keyed table because the
--- bindings are generated from the tables below.
+-- Raw input, written by the action bindings.
 local axes: { [string]: number } = {
 	throttle = 0,
 	brake = 0,
@@ -45,16 +45,11 @@ local axes: { [string]: number } = {
 }
 local handbrakeHeld = false
 
--- Eased input, what actually reaches the constraints.
-local smoothed = { throttle = 0, steer = 0 }
-
-local car: Model? = nil
-local chassis: BasePart? = nil
-local driveHinges: { HingeConstraint } = {}
-local steerHinges: { HingeConstraint } = {}
-local tailLamps: { Light } = {}
-local brakeLightsLit = false
+local state: CarDrive.State? = nil
 local stepConnection: RBXScriptConnection? = nil
+local inputRemote: RemoteEvent? = nil
+local sinceLastSend = 0
+local announcedDriving = false
 
 local KEY_ACTIONS = {
 	{ name = "CarThrottle", field = "throttle", keys = { Enum.KeyCode.W, Enum.KeyCode.Up } },
@@ -70,33 +65,44 @@ local PAD_ACTIONS = {
 
 local PRIORITY = Enum.ContextActionPriority.High.Value
 
+local function debugPrint(message: string, ...)
+	if CarConfig.Debug then
+		print(("[CarController] " .. message):format(...))
+	end
+end
+
 local function resetInput()
 	for key in axes do
 		axes[key] = 0
 	end
 	handbrakeHeld = false
-	smoothed.throttle = 0
-	smoothed.steer = 0
+	announcedDriving = false
+end
+
+local function currentInput(): CarDrive.Input
+	local throttle = math.clamp(axes.throttle + axes.padThrottle - axes.brake - axes.padBrake, -1, 1)
+	local steer = math.clamp(axes.steerRight - axes.steerLeft + axes.padSteer, -1, 1)
+	return { throttle = throttle, steer = steer, handbrake = handbrakeHeld }
 end
 
 local function bindControls()
 	for _, action in KEY_ACTIONS do
-		ContextActionService:BindActionAtPriority(action.name, function(_, state)
-			axes[action.field] = if state == Enum.UserInputState.Begin then 1 else 0
+		ContextActionService:BindActionAtPriority(action.name, function(_, inputState)
+			axes[action.field] = if inputState == Enum.UserInputState.Begin then 1 else 0
 			return Enum.ContextActionResult.Sink
 		end, false, PRIORITY, table.unpack(action.keys))
 	end
 
 	-- Triggers are analogue: their travel arrives on Position.Z.
 	for _, action in PAD_ACTIONS do
-		ContextActionService:BindActionAtPriority(action.name, function(_, state, object)
-			axes[action.field] = if state == Enum.UserInputState.End then 0 else object.Position.Z
+		ContextActionService:BindActionAtPriority(action.name, function(_, inputState, object)
+			axes[action.field] = if inputState == Enum.UserInputState.End then 0 else object.Position.Z
 			return Enum.ContextActionResult.Sink
 		end, false, PRIORITY, action.key)
 	end
 
-	ContextActionService:BindActionAtPriority("CarPadSteer", function(_, state, object)
-		if state == Enum.UserInputState.End or state == Enum.UserInputState.Cancel then
+	ContextActionService:BindActionAtPriority("CarPadSteer", function(_, inputState, object)
+		if inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
 			axes.padSteer = 0
 		else
 			local x = object.Position.X
@@ -106,8 +112,8 @@ local function bindControls()
 	end, false, PRIORITY, Enum.KeyCode.Thumbstick1)
 
 	-- Not Space: that is how a seated character hops out, and it stays that way.
-	ContextActionService:BindActionAtPriority("CarHandbrake", function(_, state)
-		handbrakeHeld = state == Enum.UserInputState.Begin
+	ContextActionService:BindActionAtPriority("CarHandbrake", function(_, inputState)
+		handbrakeHeld = inputState == Enum.UserInputState.Begin
 		return Enum.ContextActionResult.Sink
 	end, false, PRIORITY, Enum.KeyCode.LeftShift, Enum.KeyCode.ButtonB)
 end
@@ -123,75 +129,32 @@ local function unbindControls()
 	ContextActionService:UnbindAction("CarHandbrake")
 end
 
-local function setBrakeLights(lit: boolean)
-	if lit == brakeLightsLit then
-		return
-	end
-	brakeLightsLit = lit
-
-	-- Brightness only. Whether the lamps are lit at all belongs to the server, and
-	-- anything changed here is visible to this client alone.
-	for _, lamp in tailLamps do
-		lamp.Brightness = if lit then BRAKE_LIGHT_BRIGHTNESS else IDLE_LIGHT_BRIGHTNESS
+local function send(input: CarDrive.Input)
+	if inputRemote then
+		inputRemote:FireServer(input)
 	end
 end
 
-local function applyToWheels(spin: number, drivenTorque: number, freeTorque: number)
-	for _, hinge in driveHinges do
-		hinge.AngularVelocity = spin
-		hinge.MotorMaxTorque = if hinge:GetAttribute("Driven") then drivenTorque else freeTorque
-	end
-end
-
-local function update(deltaTime: number)
-	local body = chassis
-	if not body then
+local function step(deltaTime: number)
+	local active = state
+	if not active then
 		return
 	end
 
-	local throttleInput = math.clamp(axes.throttle + axes.padThrottle - axes.brake - axes.padBrake, -1, 1)
-	local steerInput = math.clamp(axes.steerRight - axes.steerLeft + axes.padSteer, -1, 1)
-	if DRIVE.InvertSteering then
-		steerInput = -steerInput
+	local input = currentInput()
+	CarDrive.apply(active, input, deltaTime)
+
+	if not announcedDriving and (math.abs(input.throttle) > 0.05 or math.abs(input.steer) > 0.05) then
+		announcedDriving = true
+		debugPrint("input reaching the car: throttle %.2f, steer %.2f", input.throttle, input.steer)
 	end
 
-	-- Ease both inputs so the tyres are never asked for instant full lock or full
-	-- throttle, which is what makes a constraint car snap sideways.
-	smoothed.throttle += (throttleInput - smoothed.throttle) * math.min(deltaTime * DRIVE.ThrottleResponse, 1)
-	smoothed.steer += (steerInput - smoothed.steer) * math.min(deltaTime * DRIVE.SteerResponse, 1)
-
-	local forwardSpeed = body.AssemblyLinearVelocity:Dot(body.CFrame.LookVector)
-
-	-- Steering gives up lock as the car speeds up, so high-speed inputs do not
-	-- tip it over.
-	local speedRatio = math.clamp(math.abs(forwardSpeed) / DRIVE.MaxSpeed, 0, 1)
-	local steerLock = DRIVE.MaxSteerAngle * (1 - DRIVE.SteerSpeedFalloff * speedRatio)
-	for _, hinge in steerHinges do
-		-- Hinge angles are in degrees, and a positive angle about +Y points the
-		-- wheels left, hence the negation.
-		hinge.TargetAngle = -smoothed.steer * steerLock
+	-- The server needs the input too, but not at physics rate.
+	sinceLastSend += deltaTime
+	if sinceLastSend >= SEND_INTERVAL then
+		sinceLastSend = 0
+		send(input)
 	end
-
-	-- Asking for the opposite of the way the car is already moving is a brake,
-	-- not a gear change. Below the threshold it becomes one.
-	local braking = (throttleInput > 0.05 and forwardSpeed < -DRIVE.BrakeSpeedThreshold)
-		or (throttleInput < -0.05 and forwardSpeed > DRIVE.BrakeSpeedThreshold)
-
-	if handbrakeHeld then
-		applyToWheels(0, DRIVE.HandbrakeTorque, DRIVE.HandbrakeTorque)
-	elseif braking then
-		applyToWheels(0, DRIVE.BrakeTorque, DRIVE.BrakeTorque)
-	elseif math.abs(throttleInput) > 0.05 then
-		-- Forward is a negative spin: about a wheel's +X axis the contact patch
-		-- travels towards +Z, which pushes the car along its -Z LookVector. Wheels
-		-- that are not driven get no torque at all, so they roll free.
-		local top = if smoothed.throttle >= 0 then MAX_FORWARD_SPIN else MAX_REVERSE_SPIN
-		applyToWheels(-smoothed.throttle * top, DRIVE.DriveTorque, 0)
-	else
-		applyToWheels(0, DRIVE.CoastTorque, DRIVE.CoastTorque)
-	end
-
-	setBrakeLights(braking or handbrakeHeld)
 end
 
 local function detach()
@@ -200,75 +163,70 @@ local function detach()
 		stepConnection = nil
 	end
 
-	-- Leave the car parked, in case we still own its parts on the way out.
-	if car then
-		applyToWheels(0, DRIVE.BrakeTorque, DRIVE.BrakeTorque)
-		for _, hinge in steerHinges do
-			hinge.TargetAngle = 0
-		end
+	local active = state
+	if active then
+		-- Leave the car parked, in case we still own its parts on the way out.
+		CarDrive.park(active)
+		debugPrint("stopped driving %s", active.car.Name)
 	end
 
 	unbindControls()
 	resetInput()
+	send(CarDrive.idleInput())
 
-	car = nil
-	chassis = nil
-	driveHinges = {}
-	steerHinges = {}
-	tailLamps = {}
-	brakeLightsLit = false
+	state = nil
 end
 
-local function attach(model: Model)
+local function attach(car: Model)
 	detach()
 
-	local root = model.PrimaryPart
-	if not root then
-		warn(("%s has no PrimaryPart, cannot drive it"):format(model:GetFullName()))
+	local collected = CarDrive.collect(car)
+	if not collected then
+		warn(("CarController: %s has no PrimaryPart or no drive hinges"):format(car:GetFullName()))
 		return
 	end
 
-	car = model
-	chassis = root
-
-	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("HingeConstraint") then
-			if descendant.Name == "DriveHinge" then
-				table.insert(driveHinges, descendant)
-			elseif descendant.Name == "SteerHinge" then
-				table.insert(steerHinges, descendant)
-			end
-		elseif descendant:IsA("Light") then
-			local lens = descendant.Parent
-			if lens and lens:GetAttribute("Lamp") == "Tail" then
-				table.insert(tailLamps, descendant)
-			end
-		end
-	end
-
+	state = collected
+	sinceLastSend = 0
 	bindControls()
-	stepConnection = RunService.PreSimulation:Connect(update)
+	stepConnection = RunService.PreSimulation:Connect(step)
+
+	debugPrint(
+		"driving %s -- %d drive hinges, %d steering hinges",
+		car.Name,
+		#collected.driveHinges,
+		#collected.steerHinges
+	)
+end
+
+local function seatChanged(seat: BasePart?)
+	if seat and seat:GetAttribute("IsDriverSeat") then
+		local car = seat.Parent
+		if car and car:IsA("Model") and car:GetAttribute("DriveableCar") then
+			attach(car)
+			return
+		end
+		debugPrint("sat in a driver seat whose parent is not a car model")
+	end
+	detach()
 end
 
 local function watchHumanoid(humanoid: Humanoid)
-	local function seatChanged()
-		local seat = humanoid.SeatPart
-		if seat and seat:GetAttribute("IsDriverSeat") then
-			local model = seat.Parent
-			if model and model:IsA("Model") and model:GetAttribute("DriveableCar") then
-				attach(model)
-				return
-			end
-		end
-		detach()
-	end
-
-	humanoid:GetPropertyChangedSignal("SeatPart"):Connect(seatChanged)
+	humanoid.Seated:Connect(function(active: boolean, seat: BasePart?)
+		seatChanged(if active then seat else nil)
+	end)
 	humanoid.Died:Connect(detach)
-	seatChanged()
+
+	-- Covers the case where we are already seated when this runs.
+	seatChanged(humanoid.SeatPart)
 end
 
 function CarController.start()
+	inputRemote = ReplicatedStorage:WaitForChild("CarInput", 30) :: RemoteEvent
+	if not inputRemote then
+		warn("CarController: ReplicatedStorage.CarInput never appeared; is CarService running?")
+	end
+
 	local function characterAdded(character: Model)
 		local humanoid = character:WaitForChild("Humanoid", 10)
 		if humanoid and humanoid:IsA("Humanoid") then
@@ -282,6 +240,8 @@ function CarController.start()
 	if player.Character then
 		characterAdded(player.Character)
 	end
+
+	debugPrint("ready -- walk up to a car and press E")
 end
 
 return CarController

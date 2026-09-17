@@ -1,26 +1,48 @@
 --[[
 	CarService -- spawns the cars and hands control of one to whoever sits in it.
 
-	The driving itself happens on the driver's client (see CarController): this
-	service gives them network ownership of the car's parts so their input moves
-	the car without a round trip to the server. What stays here is everything that
-	has to be authoritative -- seating people, the lights, parking an empty car,
-	and putting a flipped one back on its wheels.
+	Control is shared deliberately. The driver's client gets network ownership of
+	the car's parts and drives them locally, so the car answers the keyboard with
+	no round trip; it also relays its input up here, and this service runs the
+	same CarDrive maths on it. That second path is what makes the car work if
+	ownership has not transferred yet, and keeps the constraint values the server
+	replicates to other players in step with what the driver is doing.
+
+	Everything that has to be authoritative stays here: seating, the lights,
+	holding an empty car still, and putting a flipped one back on its wheels.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
 local CarConfig = require(CarFolder.CarConfig)
+local CarDrive = require(CarFolder.CarDrive)
 local CarModel = require(CarFolder.CarModel)
 
 local RESET = CarConfig.Reset
 
 local CarService = {}
 
-local cars: { Model } = {}
+type Entry = {
+	car: Model,
+	state: CarDrive.State,
+	seat: any, -- the VehicleSeat; typed loosely so Sit/Occupant need no casts
+	driver: Player?,
+	input: CarDrive.Input,
+	flippedFor: number,
+}
+
+local entries: { Entry } = {}
+local inputRemote: RemoteEvent
+
+local function debugPrint(message: string, ...)
+	if CarConfig.Debug then
+		print(("[CarService] " .. message):format(...))
+	end
+end
 
 local function forEachPart(car: Model, apply: (BasePart) -> ())
 	for _, descendant in car:GetDescendants() do
@@ -30,21 +52,24 @@ local function forEachPart(car: Model, apply: (BasePart) -> ())
 	end
 end
 
-local function isSeat(instance: Instance): boolean
-	return instance:IsA("VehicleSeat") or instance:IsA("Seat")
-end
-
-local function setNetworkOwner(car: Model, owner: Player?)
+local function setNetworkOwner(car: Model, owner: Player?): number
+	local count = 0
 	forEachPart(car, function(part)
 		if part.Anchored then
 			return
 		end
-		if owner then
-			part:SetNetworkOwner(owner)
-		else
-			part:SetNetworkOwnershipAuto()
+		local ok = pcall(function()
+			if owner then
+				part:SetNetworkOwner(owner)
+			else
+				part:SetNetworkOwnershipAuto()
+			end
+		end)
+		if ok then
+			count += 1
 		end
 	end)
+	return count
 end
 
 local function setLights(car: Model, on: boolean)
@@ -60,49 +85,63 @@ local function setLights(car: Model, on: boolean)
 	end)
 end
 
--- Straightens the wheels and holds the car still. Also the state an empty car
--- sits in, so nobody comes back to find it has rolled down a hill.
-local function park(car: Model)
-	for _, descendant in car:GetDescendants() do
-		if not descendant:IsA("HingeConstraint") then
-			continue
-		end
-		if descendant.Name == "DriveHinge" then
-			descendant.AngularVelocity = 0
-			descendant.MotorMaxTorque = CarConfig.Driving.BrakeTorque
-		elseif descendant.Name == "SteerHinge" then
-			descendant.TargetAngle = 0
+local function findEntry(car: Model): Entry?
+	for _, entry in entries do
+		if entry.car == car then
+			return entry
 		end
 	end
+	return nil
 end
 
-local function isOccupied(car: Model): boolean
-	for _, descendant in car:GetDescendants() do
-		-- Checked inline rather than through isSeat() so that Occupant narrows.
-		if descendant:IsA("VehicleSeat") or descendant:IsA("Seat") then
-			if descendant.Occupant then
-				return true
-			end
+local function entryForDriver(player: Player): Entry?
+	for _, entry in entries do
+		if entry.driver == player then
+			return entry
 		end
 	end
-	return false
+	return nil
 end
 
-local function resetCar(car: Model)
-	local pivot = car:GetAttribute("SpawnPivot")
+local function resetCar(entry: Entry)
+	local pivot = entry.car:GetAttribute("SpawnPivot")
 	if typeof(pivot) ~= "CFrame" then
 		return
 	end
 
-	car:PivotTo(pivot)
-	forEachPart(car, function(part)
+	entry.car:PivotTo(pivot)
+	forEachPart(entry.car, function(part)
 		part.AssemblyLinearVelocity = Vector3.zero
 		part.AssemblyAngularVelocity = Vector3.zero
 	end)
-	park(car)
+	CarDrive.park(entry.state)
+	debugPrint("reset %s to its spawn", entry.car.Name)
 end
 
-local function bindSeat(car: Model, seat: any)
+local function onOccupantChanged(entry: Entry)
+	local occupant = entry.seat.Occupant
+	local prompt = entry.seat:FindFirstChildOfClass("ProximityPrompt")
+	if prompt then
+		prompt.Enabled = occupant == nil
+	end
+
+	local driver = occupant and Players:GetPlayerFromCharacter(occupant.Parent)
+	entry.driver = driver
+	entry.input = CarDrive.idleInput()
+
+	if driver then
+		local owned = setNetworkOwner(entry.car, driver)
+		setLights(entry.car, true)
+		debugPrint("%s is driving; network ownership of %d parts handed over", driver.Name, owned)
+	else
+		setNetworkOwner(entry.car, nil)
+		CarDrive.park(entry.state)
+		setLights(entry.car, false)
+		debugPrint("%s is empty again", entry.car.Name)
+	end
+end
+
+local function bindSeat(entry: Entry, seat: any)
 	local prompt = seat:FindFirstChildOfClass("ProximityPrompt")
 	local isDriverSeat = seat:GetAttribute("IsDriverSeat") == true
 
@@ -117,28 +156,17 @@ local function bindSeat(car: Model, seat: any)
 		end)
 	end
 
-	seat:GetPropertyChangedSignal("Occupant"):Connect(function()
-		local occupant = seat.Occupant
-
-		-- No prompt on a seat that is already taken.
-		if prompt then
-			prompt.Enabled = occupant == nil
-		end
-
-		if not isDriverSeat then
-			return
-		end
-
-		local driver = occupant and Players:GetPlayerFromCharacter(occupant.Parent)
-		if driver then
-			setNetworkOwner(car, driver)
-			setLights(car, true)
-		else
-			setNetworkOwner(car, nil)
-			park(car)
-			setLights(car, false)
-		end
-	end)
+	if isDriverSeat then
+		seat:GetPropertyChangedSignal("Occupant"):Connect(function()
+			onOccupantChanged(entry)
+		end)
+	else
+		seat:GetPropertyChangedSignal("Occupant"):Connect(function()
+			if prompt then
+				prompt.Enabled = seat.Occupant == nil
+			end
+		end)
+	end
 end
 
 local function carContainer(): Folder
@@ -156,62 +184,102 @@ end
 --[[
 	Builds a car at `pivot` (its car-space origin) and wires up its seats.
 ]]
-function CarService.spawnCar(pivot: CFrame): Model
+function CarService.spawnCar(pivot: CFrame): Model?
 	local car = CarModel.build(pivot)
 	car.Parent = carContainer()
 	car:SetAttribute("SpawnPivot", car:GetPivot())
 
+	local state = CarDrive.collect(car)
+	local driverSeat = car:FindFirstChild("DriverSeat")
+
+	if not state or not driverSeat then
+		warn("CarService: built a car with no drivable constraints or no driver seat")
+		car:Destroy()
+		return nil
+	end
+
+	local entry: Entry = {
+		car = car,
+		state = state,
+		seat = driverSeat,
+		driver = nil,
+		input = CarDrive.idleInput(),
+		flippedFor = 0,
+	}
+	table.insert(entries, entry)
+
 	for _, descendant in car:GetDescendants() do
-		if isSeat(descendant) then
-			bindSeat(car, descendant)
+		if descendant:IsA("VehicleSeat") or descendant:IsA("Seat") then
+			bindSeat(entry, descendant)
 		end
 	end
 
-	park(car)
+	CarDrive.park(state)
 	setLights(car, false)
-	table.insert(cars, car)
 
 	return car
 end
 
--- An empty car that has landed on its roof or fallen off the world goes back to
--- where it started, so the place cannot be left without a driveable car in it.
-local function watchForStuckCars()
-	local flippedFor: { [Model]: number } = {}
+local function onInputReceived(player: Player, raw: any)
+	local entry = entryForDriver(player)
+	if not entry then
+		return -- not driving anything, so nothing to steer
+	end
+	entry.input = CarDrive.sanitizeInput(raw)
+end
 
-	while true do
-		local elapsed = task.wait(1)
+-- Applies the relayed input, and recovers cars that are stuck or lost.
+local function step(deltaTime: number)
+	for _, entry in entries do
+		local chassis = entry.car.PrimaryPart
+		if not chassis then
+			continue
+		end
 
-		for _, car in cars do
-			local chassis = car.PrimaryPart
-			if not chassis or isOccupied(car) then
-				flippedFor[car] = 0
-				continue
+		if entry.driver then
+			CarDrive.apply(entry.state, entry.input, deltaTime)
+			entry.flippedFor = 0
+			continue
+		end
+
+		if chassis.Position.Y < RESET.MinHeight then
+			resetCar(entry)
+			entry.flippedFor = 0
+		elseif chassis.CFrame.UpVector.Y < RESET.FlippedUpThreshold then
+			entry.flippedFor += deltaTime
+			if entry.flippedFor >= RESET.FlippedSeconds then
+				resetCar(entry)
+				entry.flippedFor = 0
 			end
-
-			if chassis.Position.Y < RESET.MinHeight then
-				resetCar(car)
-				flippedFor[car] = 0
-			elseif chassis.CFrame.UpVector.Y < RESET.FlippedUpThreshold then
-				local total = (flippedFor[car] or 0) + elapsed
-				flippedFor[car] = total
-				if total >= RESET.FlippedSeconds then
-					resetCar(car)
-					flippedFor[car] = 0
-				end
-			else
-				flippedFor[car] = 0
-			end
+		else
+			entry.flippedFor = 0
 		end
 	end
 end
 
 function CarService.start()
+	inputRemote = Instance.new("RemoteEvent")
+	inputRemote.Name = "CarInput"
+	inputRemote.Parent = ReplicatedStorage
+	inputRemote.OnServerEvent:Connect(onInputReceived)
+
 	for _, pivot in CarConfig.Spawns do
 		CarService.spawnCar(pivot)
 	end
 
-	task.spawn(watchForStuckCars)
+	Players.PlayerRemoving:Connect(function(player)
+		local entry = entryForDriver(player)
+		if entry then
+			entry.driver = nil
+			entry.input = CarDrive.idleInput()
+			CarDrive.park(entry.state)
+			setLights(entry.car, false)
+		end
+	end)
+
+	RunService.PreSimulation:Connect(step)
+
+	debugPrint("%d cars spawned -- %s", #entries, CarModel.describe())
 end
 
 return CarService
