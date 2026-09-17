@@ -6,6 +6,10 @@
       "env": {
         "DISABLE_TELEMETRY": "true"
       }
+    },
+    "figma": {
+      "url": "https://mcp.figma.com/mcp",
+      "type": "http"
     }
   }
 }
