@@ -159,3 +159,25 @@ Everything lives in `CarConfig`. The values worth reaching for first:
 - No engine sound -- that needs an audio asset ID, which the repo has none of.
 - Brake lights brighten on the driver's screen only; the server owns whether the
   lamps are lit at all, so other players see them on but not pulsing.
+
+## Blender MCP
+
+[`.mcp.json`](.mcp.json) connects Claude Code in this folder to Blender through
+[MCP for Blender](https://github.com/ahujasid/blender-mcp) (`mcp-for-blender`
+2.0.0, with its anonymous telemetry turned off). It needs
+[uv](https://docs.astral.sh/uv/) and a one-time add-on install:
+
+```bash
+uvx mcp-for-blender@2.0.0 install-addon
+```
+
+Then, each time:
+
+1. Open Blender and enable **Interface: MCP for Blender** under
+   **Edit > Preferences > Add-ons** (first time only).
+2. In the 3D viewport press `N`, open the **MCP for Blender** tab and click
+   **Connect to Claude**. It listens on `localhost:9876`.
+3. Start Claude Code here and approve the `blender` server when asked.
+
+The add-on lets Claude run any Python inside Blender, so save your `.blend`
+before asking it to change things.
