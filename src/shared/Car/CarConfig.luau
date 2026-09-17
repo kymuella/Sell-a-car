@@ -1,25 +1,26 @@
 --[[
 	CarConfig -- every number that describes how the car looks and drives.
 
-	Sizes are written in METRES and converted to studs, so the car is a scale
-	model of a real one rather than a guess. The conversion is anchored on the
-	player: an R6 Roblox character stands 5 studs tall and reads as a ~1.75 m
-	person, so one metre is 5 / 1.75 = 2.857 studs. Every dimension below is a
-	real measurement off a mid-size two-seat sports car, which is what makes it
-	look right standing next to a character:
+	The car is a Porsche 911 (991). Its meshes are imported from
+	blender models/porsche/export/Porsche.fbx and kept in
+	ServerStorage.CarModels.Porsche; the physics underneath is built from the
+	measurements below, which were taken off that same model, so the hinges line
+	up with the wheels.
 
-	  overall 4.70 x 1.85 m, 2.80 m wheelbase, 0.68 m wheels
-	  door tops at 1.05 m -- chest height on a 1.75 m person
-	  screen top at 1.25 m -- shoulder height
-	  seat cushion at 0.50 m off the ground
+	Sizes are written in METRES and converted to studs. The conversion is
+	anchored on the player: an R6 Roblox character stands 5 studs tall and reads
+	as a ~1.75 m person, so one metre is 5 / 1.75 = 2.857 studs. The real car:
 
-	Roblox characters are proportionally about 50% wider than real people (2
-	studs across the shoulders where 1.3 would be true to life), so at honest
-	scale two of them only just fit side by side. The car is open-topped for the
-	same reason: a seated character's head sits where a real one would not.
+	  overall 4.39 x 1.81 m, 2.45 m wheelbase, 0.66 m wheels
+	  roof at 1.26 m, door tops at 0.86 m
 
-	Geometry is in "car space": the origin is at wheel-axle height in the middle
-	of the car, +Y is up and -Z is forward (the chassis part's LookVector).
+	At honest scale a seated Roblox character's head goes through that roof:
+	characters sit about 1.3 m tall where a person sits about 0.9 m. So the whole
+	car is built Scale times life size -- meshes and physics alike -- which is the
+	smallest it can be with a closed roof over the driver.
+
+	Geometry is in "car space": the origin is at wheel-axle height midway between
+	the axles, +Y is up and -Z is forward (the chassis part's LookVector).
 ]]
 
 local HUMAN_HEIGHT_STUDS = 5 -- an R6 character
@@ -27,52 +28,75 @@ local HUMAN_HEIGHT_METRES = 1.75
 
 local STUDS_PER_METRE = HUMAN_HEIGHT_STUDS / HUMAN_HEIGHT_METRES
 
+local SCALE = 1.4
+
 local function studs(metres: number): number
 	return metres * STUDS_PER_METRE
 end
 
+-- A measurement off the car, at the size the car is built.
+local function scaled(metres: number): number
+	return studs(metres) * SCALE
+end
+
 local CarConfig = {}
 
-CarConfig.ModelName = "Roadster"
+CarConfig.ModelName = "Porsche 911"
+
+-- The imported meshes, in ServerStorage.CarModels.
+CarConfig.MeshTemplate = "Porsche"
 
 -- Prints what the drive script is doing to the Output window. Turn off once the
 -- car is behaving.
 CarConfig.Debug = true
 
 CarConfig.StudsPerMetre = STUDS_PER_METRE
+CarConfig.Scale = SCALE
 CarConfig.studs = studs
+CarConfig.scaled = scaled
 
 CarConfig.Dimensions = {
-	Length = studs(4.7),
-	Width = studs(1.85),
-	Wheelbase = studs(2.8),
-	TrackWidth = studs(1.58), -- centre to centre of the wheels
+	Width = scaled(1.81), -- body, not counting the mirrors
+	Wheelbase = scaled(2.45),
+	TrackWidth = scaled(1.5), -- centre to centre of the wheels
+
+	-- Along the car, from the middle of the wheelbase (+ is rearward).
+	Front = scaled(-2.22), -- tip of the front bumper
+	Rear = scaled(2.17), -- tip of the rear bumper
+	CabinFront = scaled(-0.9), -- the windscreen base
+	CabinRear = scaled(1.0), -- behind the rear seats, under the back window
+	RoofFront = scaled(-0.14), -- top of the windscreen
+	RoofRear = scaled(0.97), -- top of the back window
+	SeatZ = scaled(0.12), -- middle of the seat cushions
 
 	-- Heights, all measured off the ground.
-	GroundClearance = studs(0.14),
-	FloorHeight = studs(0.35), -- cabin floor
-	SeatHeight = studs(0.5), -- seat cushion
-	CowlHeight = studs(0.95), -- top of the bonnet
-	BeltHeight = studs(1.05), -- door tops / window line
-	ScreenHeight = studs(1.25), -- top of the windscreen
+	GroundClearance = scaled(0.1),
+	FloorHeight = scaled(0.16), -- cabin floor
+	SeatHeight = scaled(0.28), -- seat cushion
+	NoseHeight = scaled(0.72), -- the bonnet, roughly: it slopes 0.64-0.81 m
+	BeltHeight = scaled(0.86), -- door tops / window line
+	DeckHeight = scaled(0.84), -- the engine lid
+	RoofHeight = scaled(1.26),
 
-	-- Where the cabin sits along the car.
-	CabinFront = studs(-0.56), -- the windscreen base, on the cowl
-	CabinRear = studs(0.7), -- the bulkhead behind the seats
-
-	SillWidth = studs(0.12),
-	WheelRadius = studs(0.34), -- 0.68 m diameter
-	WheelWidth = studs(0.225),
-	SeatOffset = studs(0.4), -- how far each seat sits off the centreline
+	RoofWidth = scaled(1.1),
+	SillWidth = scaled(0.1),
+	WheelRadius = scaled(0.33),
+	WheelWidth = scaled(0.28),
+	SeatOffset = scaled(0.31), -- how far each seat sits off the centreline
 }
 
 CarConfig.Appearance = {
 	BodyColor = Color3.fromRGB(178, 42, 38),
+	PaintReflectance = 0.08,
 	TrimColor = Color3.fromRGB(27, 30, 34),
-	GlassColor = Color3.fromRGB(162, 196, 214),
-	GlassTransparency = 0.62,
+	ChromeColor = Color3.fromRGB(170, 173, 178),
+	GlassColor = Color3.fromRGB(38, 46, 54),
+	GlassTransparency = 0.35,
+	LampGlassColor = Color3.fromRGB(232, 236, 240),
 	TyreColor = Color3.fromRGB(24, 24, 26),
 	RimColor = Color3.fromRGB(178, 181, 186),
+	CaliperColor = Color3.fromRGB(196, 28, 32),
+	PlateColor = Color3.fromRGB(236, 236, 230),
 	HeadlightColor = Color3.fromRGB(255, 246, 214),
 	TaillightColor = Color3.fromRGB(216, 32, 32),
 }
@@ -81,8 +105,8 @@ CarConfig.Physics = {
 	BodyDensity = 1,
 
 	-- Hidden mass slung low in the frame. It puts the centre of gravity about
-	-- 0.4 m off the ground, which is roughly where a real car's sits, and is
-	-- what stops this one rolling over in a corner.
+	-- 0.35 m off the ground at life size, which is roughly where a real 911's
+	-- sits, and is what stops this one rolling over in a corner.
 	BallastDensity = 5,
 
 	KnuckleDensity = 25, -- a light steering knuckle makes hinge cars jitter
@@ -97,19 +121,20 @@ CarConfig.Driving = {
 	MaxSpeed = studs(42), -- 42 m/s, about 150 km/h
 	MaxReverseSpeed = studs(11),
 
-	-- Hinge motor torques, per wheel. The tyres break traction somewhere above
-	-- 23000 at this mass, so DriveTorque is deliberately under it and
-	-- BrakeTorque deliberately near it.
-	DriveTorque = 7000,
-	BrakeTorque = 20000,
-	HandbrakeTorque = 30000,
-	CoastTorque = 800, -- engine braking when you lift off
+	-- Hinge motor torques, per wheel. At this size and mass, DriveTorque reaches
+	-- MaxSpeed in under 2 s without wheelspin, and BrakeTorque stops the car
+	-- from MaxSpeed in about a second without locking the wheels. Torque has to
+	-- grow with mass times wheel radius, so retune these if you change Scale.
+	DriveTorque = 15000,
+	BrakeTorque = 42000,
+	HandbrakeTorque = 63000,
+	CoastTorque = 1700, -- engine braking when you lift off
 	MotorMaxAcceleration = 400, -- rad/s^2; high, so torque stays the limit
 
 	AllWheelDrive = true, -- false drives the rear wheels only
 
 	MaxSteerAngle = 34, -- degrees of lock (hinge angles are in degrees)
-	SteerTorque = 30000,
+	SteerTorque = 60000,
 	SteerSpeed = 8, -- rad/s the steering servo tracks its target at
 	SteerSpeedFalloff = 0.6, -- fraction of lock given up at MaxSpeed
 	InvertSteering = false,

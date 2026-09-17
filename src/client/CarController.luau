@@ -211,14 +211,41 @@ local function seatChanged(seat: BasePart?)
 	detach()
 end
 
+-- The car has a roof, so a character hopping out would land inside it. Stand
+-- them beside their door instead, at the spot CarModel marked on the seat.
+-- This is the client's job because the character is the client's to move: a
+-- teleport from the server loses the race with the seat weld coming apart here.
+local function stepOut(seat: BasePart, humanoid: Humanoid)
+	local offset = seat:GetAttribute("ExitOffset")
+	local character = humanoid.Parent
+	if typeof(offset) ~= "Vector3" or humanoid.Health <= 0 or not (character and character:IsA("Model")) then
+		return
+	end
+
+	local position = seat.CFrame:PointToWorldSpace(offset)
+	local forward = seat.CFrame.LookVector * Vector3.new(1, 0, 1)
+	if forward.Magnitude < 0.1 then
+		forward = Vector3.new(0, 0, -1) -- the car is on its nose or tail
+	end
+	character:PivotTo(CFrame.lookAt(position, position + forward.Unit))
+end
+
 local function watchHumanoid(humanoid: Humanoid)
+	-- Seated passes no seat when we get up, so remember which one we were in.
+	local currentSeat: BasePart? = humanoid.SeatPart
+
 	humanoid.Seated:Connect(function(active: boolean, seat: BasePart?)
-		seatChanged(if active then seat else nil)
+		local previous = currentSeat
+		currentSeat = if active then seat else nil
+		if not active and previous then
+			stepOut(previous, humanoid)
+		end
+		seatChanged(currentSeat)
 	end)
 	humanoid.Died:Connect(detach)
 
 	-- Covers the case where we are already seated when this runs.
-	seatChanged(humanoid.SeatPart)
+	seatChanged(currentSeat)
 end
 
 function CarController.start()

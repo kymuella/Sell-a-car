@@ -21,10 +21,16 @@ V1 S7
 
 ## The car
 
-A driveable car is generated from code at runtime, so there is no binary model
-file to check in -- every dimension, colour and physics value stays diffable.
-Two of them spawn into `Workspace.Cars` on startup; walk up to one and press
-**E** (or hold **X** on a gamepad) to get in.
+The car is a Porsche 911. Its physics -- the invisible body, wheels, hinges and
+seats -- is generated from code at runtime, so every dimension and physics value
+stays diffable. Its look is 23 meshes imported from
+[`blender models/porsche/export/Porsche.fbx`](blender%20models/porsche/export/Porsche.fbx),
+which live in the place file as `ServerStorage.CarModels.Porsche`. Two cars
+spawn into `Workspace.Cars` on startup; walk up to one and press **E** (or hold
+**X** on a gamepad) to get in.
+
+The car is built at 1.4x life size (`CarConfig.Scale`): at true scale a seated
+Roblox character's head goes through a 911's roof.
 
 ### Controls
 
@@ -33,7 +39,7 @@ Two of them spawn into `Workspace.Cars` on startup; walk up to one and press
 | Throttle / reverse | `W` / `S` (or arrow keys) | `R2` / `L2` |
 | Steer | `A` / `D` (or arrow keys) | left thumbstick |
 | Handbrake | `LeftShift` | `B` |
-| Get out | `Space` | jump |
+| Get out (you are stood beside your door) | `Space` | jump |
 
 Pressing throttle against the direction you are already travelling brakes
 instead of changing gear; below a couple of studs per second it pulls away the
@@ -43,10 +49,12 @@ other way.
 
 | File | Role |
 | --- | --- |
-| [src/shared/Car/CarConfig.luau](src/shared/Car/CarConfig.luau) | Every tunable number: geometry, colours, physics, torques, steering |
-| [src/shared/Car/CarModel.luau](src/shared/Car/CarModel.luau) | Builds the parts and constraints and returns the model |
+| [src/shared/Car/CarConfig.luau](src/shared/Car/CarConfig.luau) | Every tunable number: measurements, scale, colours, physics, torques, steering |
+| [src/shared/Car/CarModel.luau](src/shared/Car/CarModel.luau) | Builds the physics parts and constraints, then welds the Porsche meshes on |
+| [src/shared/Car/CarDrive.luau](src/shared/Car/CarDrive.luau) | The drive maths: input to motor and steering values, run by both ends |
 | [src/server/CarService.luau](src/server/CarService.luau) | Spawns the cars, seats players, lights, parks and un-flips them |
-| [src/client/CarController.luau](src/client/CarController.luau) | The drive script: input to motor and steering values |
+| [src/client/CarController.luau](src/client/CarController.luau) | Reads the driver's input, applies it locally and relays it to the server; stands you beside the door when you get out |
+| [blender models/porsche/export_porsche.py](blender%20models/porsche/export_porsche.py) | Turns the Porsche `.blend` into `Porsche.fbx` |
 
 The rear wheels hang off the chassis on `HingeConstraint` motors. The front
 wheels hang off a steering knuckle, which hangs off the chassis on a second
@@ -54,17 +62,62 @@ hinge running vertically, driven as a servo -- so the wheels' spin axis turns
 with the steering. All four are driven by default
 (`CarConfig.Driving.AllWheelDrive`).
 
-Driving happens on the driver's client: `CarService` hands them network
-ownership of the car's parts, so their input is simulated locally and the
-motion replicates out to everyone else, instead of every keypress waiting on a
-round trip to the server. The server keeps what has to be authoritative --
-seating, lights, holding an empty car still, and putting a flipped one back on
-its wheels after a few seconds.
+The body collides as a few invisible boxes -- nose, tail, sills and roof --
+sized from measurements taken off the Porsche model, and the wheel hinges sit
+exactly inside the wheel meshes. The meshes themselves are massless and never
+collide. Tyres and rims are welded to the spinning wheels, and the brake
+calipers to the steering knuckles, so they turn with the steering but do not
+spin.
+
+`CarService` hands the driver network ownership of the car's parts and their
+client runs `CarDrive` on their input, so the car answers immediately. The
+client also relays that input to the server, which runs the same maths on it,
+so the car still drives before ownership has transferred. The server keeps what
+has to be authoritative -- seating, lights, holding an empty car still, and
+putting a flipped one back on its wheels after a few seconds.
+
+### Re-importing the Porsche
+
+`ServerStorage.CarModels.Porsche` is in the place file, not the repo, and the
+game will not start without it. To bring it back:
+
+1. **Import 3D** `blender models/porsche/export/Porsche.fbx` with **Scale Unit**
+   set to Stud and **Set Pivot to Scene Origin** ticked.
+2. The importer brings it in 100x too big and facing backwards. Run this in the
+   command bar to fix that and put it in place:
+
+   ```lua
+   local imported = workspace.Porsche
+   local pivot = imported:GetPivot()
+   local template = Instance.new("Model")
+   template.Name = "Porsche"
+   for _, part in imported:GetChildren() do
+   	if part:IsA("MeshPart") then
+   		local rel = CFrame.Angles(0, math.pi, 0) * pivot:ToObjectSpace(part.CFrame)
+   		part.Size *= 0.01
+   		part.CFrame = CFrame.new(rel.Position * 0.01) * rel.Rotation
+   		part.Anchored = true
+   		part.Parent = template
+   	end
+   end
+   template.WorldPivot = CFrame.identity
+   local folder = game.ServerStorage:FindFirstChild("CarModels") or Instance.new("Folder", game.ServerStorage)
+   folder.Name = "CarModels"
+   template.Parent = folder
+   imported:Destroy()
+   ```
+
+To change the model itself, edit the `.blend` and rerun `export_porsche.py`
+(its docstring has the command). Parts are matched by name, so keep the names
+it gives them.
 
 ### Tuning it
 
 Everything lives in `CarConfig`. The values worth reaching for first:
 
+- `Appearance.BodyColor` -- the paint
+- `Scale` -- how many times life size the car is built. Below about 1.4 heads
+  go through the roof, and the torques need retuning if you change it
 - `Driving.MaxSpeed` / `MaxReverseSpeed` -- studs per second
 - `Driving.DriveTorque` / `BrakeTorque` / `HandbrakeTorque` -- per wheel
 - `Driving.MaxSteerAngle` and `SteerSpeedFalloff` -- lock, and how much of it is
@@ -78,8 +131,11 @@ Everything lives in `CarConfig`. The values worth reaching for first:
 - No suspension. The wheels are hinged straight to the frame, which is far more
   stable than a spring setup and needs no tuning, but the car does not soak up
   bumps.
-- Only the chassis slab collides. The bodywork is cosmetic and welded on, which
-  keeps the physics cheap but means bumpers and mirrors will clip into walls.
+- The body collides as boxes, not as the Porsche's shape, which keeps the
+  physics cheap but means mirrors and bumper corners will clip into walls.
+- Tall hair and hats poke through the roof; the head itself fits.
+- About 83k triangles per car. Fine for a handful of cars, but worth watching
+  if a server spawns dozens.
 - No engine sound -- that needs an audio asset ID, which the repo has none of.
 - Brake lights brighten on the driver's screen only; the server owns whether the
   lamps are lit at all, so other players see them on but not pulsing.
