@@ -18,12 +18,16 @@ export type PlayerData = {
 	CardexDiscovered: { [string]: boolean },
 	SelectedCar: string,
 	Paints: { [string]: { R: number, G: number, B: number } },
+	Has2xCash: boolean,
+	IsVIP: boolean,
+	HasNitro: boolean,
 }
 
 local sessionData: { [Player]: PlayerData } = {}
 local remotesFolder: Folder
 local syncRemote: RemoteEvent
 local buyRemote: RemoteFunction
+local buyRobuxRemote: RemoteFunction
 local spawnRemote: RemoteFunction
 local despawnRemote: RemoteFunction
 local teleportRemote: RemoteFunction
@@ -45,6 +49,9 @@ local function createDefaultData(): PlayerData
 		},
 		SelectedCar = defaultCar.Id,
 		Paints = {},
+		Has2xCash = false,
+		IsVIP = false,
+		HasNitro = false,
 	}
 end
 
@@ -177,6 +184,53 @@ local function onTeleportToPlay(player: Player): (boolean, string)
 	end
 end
 
+local function onBuyRobuxProduct(player: Player, productId: any): (boolean, string)
+	local data = sessionData[player]
+	if not data then
+		return false, "Player data not loaded"
+	end
+
+	if productId == "cash_small" then
+		data.Cash += 50000
+		updateLeaderstats(player, data.Cash)
+		syncToClient(player)
+		return true, "Acquired +$50,000 Cash!"
+	elseif productId == "cash_medium" then
+		data.Cash += 200000
+		updateLeaderstats(player, data.Cash)
+		syncToClient(player)
+		return true, "Acquired +$200,000 Cash!"
+	elseif productId == "cash_large" then
+		data.Cash += 1000000
+		updateLeaderstats(player, data.Cash)
+		syncToClient(player)
+		return true, "Acquired +$1,000,000 Cash!"
+	elseif productId == "pass_2xcash" then
+		if data.Has2xCash then
+			return false, "You already own the 2x Cash Multiplier!"
+		end
+		data.Has2xCash = true
+		syncToClient(player)
+		return true, "Unlocked 2x Cash Multiplier!"
+	elseif productId == "pass_vip" then
+		if data.IsVIP then
+			return false, "You already own the VIP Pass!"
+		end
+		data.IsVIP = true
+		syncToClient(player)
+		return true, "Unlocked VIP Pass!"
+	elseif productId == "pass_nitro" then
+		if data.HasNitro then
+			return false, "You already own the Nitro Boost Pass!"
+		end
+		data.HasNitro = true
+		syncToClient(player)
+		return true, "Unlocked Nitro Boost!"
+	else
+		return false, "Unknown product"
+	end
+end
+
 function PlayerDataService.start()
 	-- Create Remote network folder in ReplicatedStorage
 	remotesFolder = Instance.new("Folder")
@@ -196,6 +250,11 @@ function PlayerDataService.start()
 	buyRemote.Name = "BuyCar"
 	buyRemote.OnServerInvoke = onBuyCar
 	buyRemote.Parent = remotesFolder
+
+	buyRobuxRemote = Instance.new("RemoteFunction")
+	buyRobuxRemote.Name = "BuyRobuxProduct"
+	buyRobuxRemote.OnServerInvoke = onBuyRobuxProduct
+	buyRobuxRemote.Parent = remotesFolder
 
 	spawnRemote = Instance.new("RemoteFunction")
 	spawnRemote.Name = "SpawnCar"
@@ -219,13 +278,14 @@ function PlayerDataService.start()
 		task.spawn(setupPlayer, player)
 	end
 
-	-- Passive playtime bonus loop
+	-- Passive playtime bonus loop with multiplier support
 	task.spawn(function()
 		while true do
 			task.wait(PLAYTIME_INTERVAL)
 			for player, data in sessionData do
 				if player.Parent then
-					data.Cash += PLAYTIME_BONUS
+					local mult = if data.Has2xCash then 2 else 1
+					data.Cash += PLAYTIME_BONUS * mult
 					updateLeaderstats(player, data.Cash)
 					syncToClient(player)
 				end

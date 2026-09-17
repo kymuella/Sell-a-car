@@ -1,14 +1,15 @@
 --[[
 	GameUI -- Main Client UI Controller.
-	Provides:
-	- Navigation HUD Dock (Cardex, Shop, Garage, Play, Cash Pill)
-	- Cardex Compendium (Obtained vs Blacked-Out Silhouette Locked Cars)
-	- Dealership / Shop (Browse & Purchase vehicles)
-	- Garage (Manage owned cars, custom paint palette, spawn/despawn)
-	- Play (Cinematic screen-fade teleport to playing area)
-	- Toast notification system
+	Features:
+	- Non-overlapping layout: Cash counter integrated into Left Navigation Dock (safe from Roblox topbar/chat/mic)
+	- Robux-Only Shop: Developer Products (Cash Packs) & Gamepasses (2x Cash, VIP, Nitro)
+	- Garage with Dual Tabs: "MY CARS" (spawn/customize) & "DEALERSHIP" (buy cars with in-game Cash)
+	- Cardex Compendium: Discovered cars vs blacked-out mystery silhouettes with direct Dealership links
+	- Play Teleport: Cinematic fade transition to the driving area
+	- Responsive design with smooth tweens and toast notifications
 ]]
 
+local MarketplaceService = game:GetService("MarketplaceService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -22,7 +23,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local GameUI = {}
 
--- UI Color Theme
+-- UI Color Palette & Design Tokens
 local THEME = {
 	BgModal = Color3.fromRGB(16, 19, 26),
 	BgCard = Color3.fromRGB(24, 28, 38),
@@ -36,6 +37,7 @@ local THEME = {
 	Gold = Color3.fromRGB(255, 204, 0),
 	Green = Color3.fromRGB(46, 204, 113),
 	Red = Color3.fromRGB(239, 68, 68),
+	RobuxGreen = Color3.fromRGB(0, 180, 100),
 	TextPrimary = Color3.fromRGB(245, 247, 250),
 	TextSecondary = Color3.fromRGB(156, 163, 175),
 	TextMuted = Color3.fromRGB(100, 107, 120),
@@ -52,6 +54,19 @@ local PAINT_PRESETS = {
 	{ Name = "Sunset Orange", Color = Color3.fromRGB(234, 88, 12) },
 }
 
+local ROBUX_ITEMS = {
+	CashPacks = {
+		{ Id = "cash_small", Name = "Small Cash Stash", Cash = 50000, Robux = 49, Icon = "💵", Desc = "Quick boost to start your collection" },
+		{ Id = "cash_medium", Name = "High Roller Bag", Cash = 200000, Robux = 149, Icon = "💼", Desc = "Instantly afford top sport supercars" },
+		{ Id = "cash_large", Name = "Billionaire Vault", Cash = 1000000, Robux = 499, Icon = "🏦", Desc = "Unlimited luxury and full garage freedom" },
+	},
+	Passes = {
+		{ Id = "pass_2xcash", Name = "2x Cash Multiplier", Robux = 249, Icon = "⚡", Desc = "Permanently double all playtime and driving income" },
+		{ Id = "pass_vip", Name = "VIP Elite Pass", Robux = 399, Icon = "👑", Desc = "Golden drift smoke, VIP title, and garage perks" },
+		{ Id = "pass_nitro", Name = "Nitro Turbo Boost", Robux = 199, Icon = "🚀", Desc = "Adds instant rocket nitrous boost to every car" },
+	}
+}
+
 -- Client State
 local localData = {
 	Cash = 0,
@@ -59,15 +74,22 @@ local localData = {
 	CardexDiscovered = { ["Porsche"] = true },
 	SelectedCar = "Porsche",
 	Paints = {},
+	Has2xCash = false,
+	IsVIP = false,
+	HasNitro = false,
 }
 
 local selectedGarageCarId = "Porsche"
 local selectedGaragePaint: Color3? = nil
+local garageCurrentTab = "GARAGE" -- "GARAGE" or "DEALERSHIP"
+local robuxShopCurrentTab = "CASH" -- "CASH" or "PASSES"
+local cardexFilter = "ALL"
 
 -- Remotes
 local remotesFolder: Folder? = nil
 local syncRemote: RemoteEvent? = nil
 local buyRemote: RemoteFunction? = nil
+local buyRobuxRemote: RemoteFunction? = nil
 local spawnRemote: RemoteFunction? = nil
 local despawnRemote: RemoteFunction? = nil
 local teleportRemote: RemoteFunction? = nil
@@ -75,8 +97,9 @@ local getDataRemote: RemoteFunction? = nil
 
 -- GUI References
 local screenGui: ScreenGui
-local cashTextLabel: TextLabel
-local cardexBadge: TextLabel
+local dockCashLabel: TextLabel
+local dockMultBadge: Frame
+local dockCardexBadge: TextLabel
 local modalContainer: Frame
 local cardexModal: Frame
 local shopModal: Frame
@@ -88,10 +111,8 @@ local toastFrame: Frame
 local cardexCardContainer: ScrollingFrame
 local cardexCountText: TextLabel
 local cardexProgressBar: Frame
-local cardexFilter = "ALL"
-local shopCardContainer: ScrollingFrame
-local garageListContainer: ScrollingFrame
-local garageDetailContainer: Frame
+local shopContentContainer: ScrollingFrame
+local garageBodyFrame: Frame
 
 -- Helper for creating GUI elements
 local function make(className: string, props: { [string]: any }): any
@@ -162,11 +183,15 @@ local function formatCash(amount: number): string
 end
 
 local function updateHUD()
-	if cashTextLabel then
-		cashTextLabel.Text = formatCash(localData.Cash)
+	if dockCashLabel then
+		dockCashLabel.Text = formatCash(localData.Cash)
 	end
 
-	if cardexBadge then
+	if dockMultBadge then
+		dockMultBadge.Visible = localData.Has2xCash == true
+	end
+
+	if dockCardexBadge then
 		local allCars = CarCatalog.getAll()
 		local discovered = 0
 		for _, car in allCars do
@@ -174,7 +199,7 @@ local function updateHUD()
 				discovered += 1
 			end
 		end
-		cardexBadge.Text = string.format("%d/%d", discovered, #allCars)
+		dockCardexBadge.Text = string.format("%d/%d", discovered, #allCars)
 	end
 end
 
@@ -197,7 +222,7 @@ local function closeModal()
 end
 
 local renderCardexContent: () -> ()
-local renderShopContent: () -> ()
+local renderRobuxShopContent: () -> ()
 local renderGarageContent: () -> ()
 
 local function openModal(targetModal: Frame)
@@ -223,7 +248,7 @@ local function openModal(targetModal: Frame)
 	if targetModal == cardexModal then
 		renderCardexContent()
 	elseif targetModal == shopModal then
-		renderShopContent()
+		renderRobuxShopContent()
 	elseif targetModal == garageModal then
 		renderGarageContent()
 	end
@@ -238,7 +263,6 @@ local function doPlayTeleport()
 	isTeleporting = true
 	closeModal()
 
-	-- Fade to black
 	fadeOverlay.Visible = true
 	fadeOverlay.BackgroundTransparency = 1
 	local fadeOut = TweenService:Create(fadeOverlay, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
@@ -247,7 +271,6 @@ local function doPlayTeleport()
 	fadeOut:Play()
 	fadeOut.Completed:Wait()
 
-	-- Teleport request on server
 	if teleportRemote then
 		local ok, msg = teleportRemote:InvokeServer()
 		if ok then
@@ -259,7 +282,6 @@ local function doPlayTeleport()
 
 	task.wait(0.3)
 
-	-- Fade back in
 	local fadeIn = TweenService:Create(fadeOverlay, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
 		BackgroundTransparency = 1,
 	})
@@ -296,7 +318,7 @@ function renderCardexContent()
 		}):Play()
 	end
 
-	local grid = make("UIGridLayout", {
+	make("UIGridLayout", {
 		CellSize = UDim2.new(0, 240, 0, 260),
 		CellPadding = UDim2.new(0, 14, 0, 14),
 		SortOrder = Enum.SortOrder.LayoutOrder,
@@ -323,7 +345,7 @@ function renderCardexContent()
 		addStroke(card, if isUnlocked then THEME.Stroke else THEME.StrokeLocked, if isUnlocked then THEME.StrokeTrans else 0.4)
 
 		if isUnlocked then
-			-- UNLOCKED CARD (Full details and vibrant styling)
+			-- UNLOCKED CARD
 			local topBar = make("Frame", {
 				Size = UDim2.new(1, 0, 0, 5),
 				BackgroundColor3 = car.AccentColor,
@@ -332,7 +354,6 @@ function renderCardexContent()
 			})
 			addCorner(topBar, 5)
 
-			-- Tier Badge
 			local tierBadge = make("TextLabel", {
 				Position = UDim2.new(0, 12, 0, 12),
 				Size = UDim2.new(0, 70, 0, 20),
@@ -345,7 +366,6 @@ function renderCardexContent()
 			})
 			addCorner(tierBadge, 4)
 
-			-- Obtained Checkmark Badge
 			local statusBadge = make("TextLabel", {
 				Position = UDim2.new(1, -95, 0, 12),
 				Size = UDim2.new(0, 83, 0, 20),
@@ -358,7 +378,6 @@ function renderCardexContent()
 			})
 			addCorner(statusBadge, 4)
 
-			-- Vehicle Name
 			make("TextLabel", {
 				Position = UDim2.new(0, 12, 0, 38),
 				Size = UDim2.new(1, -24, 0, 24),
@@ -372,7 +391,6 @@ function renderCardexContent()
 				Parent = card,
 			})
 
-			-- Subtitle
 			make("TextLabel", {
 				Position = UDim2.new(0, 12, 0, 62),
 				Size = UDim2.new(1, -24, 0, 16),
@@ -385,7 +403,6 @@ function renderCardexContent()
 				Parent = card,
 			})
 
-			-- Stat bars container
 			local statsBox = make("Frame", {
 				Position = UDim2.new(0, 12, 0, 86),
 				Size = UDim2.new(1, -24, 0, 105),
@@ -437,20 +454,19 @@ function renderCardexContent()
 			addStatRow(28, "Acceleration", tostring(car.Acceleration), car.Acceleration / 140)
 			addStatRow(56, "Cornering Grip", tostring(car.Grip), car.Grip / 15)
 
-			-- Drivetrain tag
 			make("TextLabel", {
 				Position = UDim2.new(0, 12, 1, -32),
 				Size = UDim2.new(1, -24, 0, 20),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
-				Text = string.format("Powertrain: %s • Fully Discovered", car.DriveType),
+				Text = string.format("Powertrain: %s • Discovered", car.DriveType),
 				TextColor3 = THEME.TextMuted,
 				TextSize = 10,
 				TextXAlignment = Enum.TextXAlignment.Center,
 				Parent = card,
 			})
 		else
-			-- LOCKED CARD (Blacked-out silhouette styling!)
+			-- LOCKED BLACKED-OUT SILHOUETTE
 			local silhouetteBox = make("Frame", {
 				Position = UDim2.new(0, 10, 0, 10),
 				Size = UDim2.new(1, -20, 1, -20),
@@ -461,10 +477,9 @@ function renderCardexContent()
 			addCorner(silhouetteBox, 8)
 			addStroke(silhouetteBox, Color3.fromRGB(30, 32, 42), 0.5)
 
-			-- Lock icon in the middle
-			local lockIcon = make("TextLabel", {
+			make("TextLabel", {
 				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.new(0.5, 0, 0.35, 0),
+				Position = UDim2.new(0.5, 0, 0.34, 0),
 				Size = UDim2.new(0, 56, 0, 56),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamBold),
@@ -474,9 +489,8 @@ function renderCardexContent()
 				Parent = silhouetteBox,
 			})
 
-			-- Mystery title
 			make("TextLabel", {
-				Position = UDim2.new(0, 8, 0, 118),
+				Position = UDim2.new(0, 8, 0, 114),
 				Size = UDim2.new(1, -16, 0, 22),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamBlack),
@@ -487,9 +501,8 @@ function renderCardexContent()
 				Parent = silhouetteBox,
 			})
 
-			-- Tier hint
 			make("TextLabel", {
-				Position = UDim2.new(0, 8, 0, 142),
+				Position = UDim2.new(0, 8, 0, 138),
 				Size = UDim2.new(1, -16, 0, 16),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
@@ -500,9 +513,8 @@ function renderCardexContent()
 				Parent = silhouetteBox,
 			})
 
-			-- Obscured specs
 			make("TextLabel", {
-				Position = UDim2.new(0, 8, 0, 164),
+				Position = UDim2.new(0, 8, 0, 158),
 				Size = UDim2.new(1, -16, 0, 16),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
@@ -513,473 +525,707 @@ function renderCardexContent()
 				Parent = silhouetteBox,
 			})
 
-			-- Shortcut to find in Shop
-			local shopBtn = make("TextButton", {
+			-- Shortcut to Dealership in Garage
+			local dealBtn = make("TextButton", {
 				Position = UDim2.new(0.1, 0, 1, -34),
 				Size = UDim2.new(0.8, 0, 0, 26),
 				BackgroundColor3 = Color3.fromRGB(24, 28, 38),
 				FontFace = Font.fromEnum(Enum.Font.GothamBold),
-				Text = "Find in Shop →",
-				TextColor3 = THEME.Accent,
+				Text = "Buy in Dealership →",
+				TextColor3 = THEME.Gold,
 				TextSize = 11,
 				BorderSizePixel = 0,
 				Parent = silhouetteBox,
 			})
-			addCorner(shopBtn, 5)
-			addStroke(shopBtn, THEME.Accent, 0.7)
+			addCorner(dealBtn, 5)
+			addStroke(dealBtn, THEME.Gold, 0.7)
 
-			shopBtn.MouseButton1Click:Connect(function()
-				openModal(shopModal)
+			dealBtn.MouseButton1Click:Connect(function()
+				garageCurrentTab = "DEALERSHIP"
+				selectedGarageCarId = car.Id
+				openModal(garageModal)
 			end)
 		end
 	end
 end
 
--- Shop Content Renderer
-function renderShopContent()
-	if not shopCardContainer then
+-- Robux-Only Shop Content Renderer
+function renderRobuxShopContent()
+	if not shopContentContainer then
 		return
 	end
-	shopCardContainer:ClearAllChildren()
+	shopContentContainer:ClearAllChildren()
 
-	local allCars = CarCatalog.getAll()
 	make("UIGridLayout", {
-		CellSize = UDim2.new(0, 240, 0, 270),
+		CellSize = UDim2.new(0, 240, 0, 240),
 		CellPadding = UDim2.new(0, 14, 0, 14),
 		SortOrder = Enum.SortOrder.LayoutOrder,
-		Parent = shopCardContainer,
+		Parent = shopContentContainer,
 	})
 
-	for i, car in allCars do
-		local isOwned = localData.OwnedCars[car.Id] == true
-		local canAfford = localData.Cash >= car.Price
+	if robuxShopCurrentTab == "CASH" then
+		for i, item in ROBUX_ITEMS.CashPacks do
+			local card = make("Frame", {
+				Name = item.Id,
+				BackgroundColor3 = THEME.BgCard,
+				BorderSizePixel = 0,
+				LayoutOrder = i,
+				Parent = shopContentContainer,
+			})
+			addCorner(card, 10)
+			addStroke(card, THEME.Stroke, THEME.StrokeTrans)
 
-		local card = make("Frame", {
-			Name = car.Id,
-			BackgroundColor3 = THEME.BgCard,
-			BorderSizePixel = 0,
-			LayoutOrder = i,
-			Parent = shopCardContainer,
-		})
-		addCorner(card, 10)
-		addStroke(card, THEME.Stroke, THEME.StrokeTrans)
+			local topBar = make("Frame", {
+				Size = UDim2.new(1, 0, 0, 4),
+				BackgroundColor3 = THEME.Gold,
+				BorderSizePixel = 0,
+				Parent = card,
+			})
+			addCorner(topBar, 4)
 
-		-- Top accent stripe
-		local bar = make("Frame", {
-			Size = UDim2.new(1, 0, 0, 4),
-			BackgroundColor3 = car.AccentColor,
-			BorderSizePixel = 0,
-			Parent = card,
-		})
-		addCorner(bar, 4)
-
-		-- Tier tag
-		local tier = make("TextLabel", {
-			Position = UDim2.new(0, 12, 0, 12),
-			Size = UDim2.new(0, 68, 0, 18),
-			BackgroundColor3 = Color3.fromRGB(35, 42, 58),
-			FontFace = Font.fromEnum(Enum.Font.GothamBold),
-			Text = string.upper(car.Tier),
-			TextColor3 = car.AccentColor,
-			TextSize = 10,
-			Parent = card,
-		})
-		addCorner(tier, 4)
-
-		-- Price tag
-		make("TextLabel", {
-			Position = UDim2.new(1, -115, 0, 12),
-			Size = UDim2.new(0, 103, 0, 18),
-			BackgroundTransparency = 1,
-			FontFace = Font.fromEnum(Enum.Font.GothamBlack),
-			Text = if car.Price == 0 then "FREE" else formatCash(car.Price),
-			TextColor3 = THEME.Gold,
-			TextSize = 13,
-			TextXAlignment = Enum.TextXAlignment.Right,
-			Parent = card,
-		})
-
-		-- Vehicle Name
-		make("TextLabel", {
-			Position = UDim2.new(0, 12, 0, 36),
-			Size = UDim2.new(1, -24, 0, 22),
-			BackgroundTransparency = 1,
-			FontFace = Font.fromEnum(Enum.Font.GothamBold),
-			Text = car.DisplayName,
-			TextColor3 = THEME.TextPrimary,
-			TextSize = 14,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-			Parent = card,
-		})
-
-		-- Description snippet
-		make("TextLabel", {
-			Position = UDim2.new(0, 12, 0, 60),
-			Size = UDim2.new(1, -24, 0, 32),
-			BackgroundTransparency = 1,
-			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
-			Text = car.Description,
-			TextColor3 = THEME.TextSecondary,
-			TextSize = 10,
-			TextWrapped = true,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextYAlignment = Enum.TextYAlignment.Top,
-			Parent = card,
-		})
-
-		-- Specs list
-		local specs = make("Frame", {
-			Position = UDim2.new(0, 12, 0, 100),
-			Size = UDim2.new(1, -24, 0, 110),
-			BackgroundColor3 = Color3.fromRGB(18, 21, 28),
-			BorderSizePixel = 0,
-			Parent = card,
-		})
-		addCorner(specs, 6)
-
-		local function specLine(y: number, label: string, val: string)
 			make("TextLabel", {
-				Position = UDim2.new(0, 8, 0, y),
-				Size = UDim2.new(0.5, -8, 0, 20),
+				Position = UDim2.new(0, 12, 0, 12),
+				Size = UDim2.new(0, 36, 0, 36),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+				Text = item.Icon,
+				TextSize = 28,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 56, 0, 12),
+				Size = UDim2.new(1, -68, 0, 20),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = item.Name,
+				TextColor3 = THEME.TextPrimary,
+				TextSize = 14,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 56, 0, 32),
+				Size = UDim2.new(1, -68, 0, 16),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+				Text = "+" .. formatCash(item.Cash),
+				TextColor3 = THEME.Gold,
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 12, 0, 72),
+				Size = UDim2.new(1, -24, 0, 50),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
-				Text = label,
+				Text = item.Desc,
 				TextColor3 = THEME.TextSecondary,
 				TextSize = 11,
+				TextWrapped = true,
 				TextXAlignment = Enum.TextXAlignment.Left,
-				Parent = specs,
+				TextYAlignment = Enum.TextYAlignment.Top,
+				Parent = card,
+			})
+
+			local buyBtn = make("TextButton", {
+				Position = UDim2.new(0, 12, 1, -44),
+				Size = UDim2.new(1, -24, 0, 32),
+				BackgroundColor3 = THEME.RobuxGreen,
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = string.format("R$ %d", item.Robux),
+				TextColor3 = Color3.fromRGB(255, 255, 255),
+				TextSize = 13,
+				BorderSizePixel = 0,
+				Parent = card,
+			})
+			addCorner(buyBtn, 6)
+
+			buyBtn.MouseButton1Click:Connect(function()
+				if buyRobuxRemote then
+					buyBtn.Text = "Processing..."
+					local ok, msg = buyRobuxRemote:InvokeServer(item.Id)
+					if ok then
+						showToast("🎉 " .. msg, false)
+						updateHUD()
+					else
+						showToast(msg or "Purchase failed", true)
+					end
+					buyBtn.Text = string.format("R$ %d", item.Robux)
+				end
+			end)
+		end
+	else
+		for i, item in ROBUX_ITEMS.Passes do
+			local isOwned = (item.Id == "pass_2xcash" and localData.Has2xCash)
+				or (item.Id == "pass_vip" and localData.IsVIP)
+				or (item.Id == "pass_nitro" and localData.HasNitro)
+
+			local card = make("Frame", {
+				Name = item.Id,
+				BackgroundColor3 = THEME.BgCard,
+				BorderSizePixel = 0,
+				LayoutOrder = i,
+				Parent = shopContentContainer,
+			})
+			addCorner(card, 10)
+			addStroke(card, THEME.Stroke, THEME.StrokeTrans)
+
+			local topBar = make("Frame", {
+				Size = UDim2.new(1, 0, 0, 4),
+				BackgroundColor3 = THEME.Accent,
+				BorderSizePixel = 0,
+				Parent = card,
+			})
+			addCorner(topBar, 4)
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 12, 0, 12),
+				Size = UDim2.new(0, 36, 0, 36),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+				Text = item.Icon,
+				TextSize = 28,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 56, 0, 12),
+				Size = UDim2.new(1, -68, 0, 20),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = item.Name,
+				TextColor3 = THEME.TextPrimary,
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 56, 0, 32),
+				Size = UDim2.new(1, -68, 0, 16),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = if isOwned then "ACTIVE" else "GAMEPASS",
+				TextColor3 = if isOwned then THEME.Green else THEME.Accent,
+				TextSize = 11,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 12, 0, 72),
+				Size = UDim2.new(1, -24, 0, 50),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+				Text = item.Desc,
+				TextColor3 = THEME.TextSecondary,
+				TextSize = 11,
+				TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Top,
+				Parent = card,
+			})
+
+			local buyBtn = make("TextButton", {
+				Position = UDim2.new(0, 12, 1, -44),
+				Size = UDim2.new(1, -24, 0, 32),
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				TextSize = 13,
+				BorderSizePixel = 0,
+				Parent = card,
+			})
+			addCorner(buyBtn, 6)
+
+			if isOwned then
+				buyBtn.BackgroundColor3 = Color3.fromRGB(28, 48, 38)
+				buyBtn.Text = "OWNED ✓"
+				buyBtn.TextColor3 = THEME.Green
+				buyBtn.AutoButtonColor = false
+			else
+				buyBtn.BackgroundColor3 = THEME.RobuxGreen
+				buyBtn.Text = string.format("R$ %d", item.Robux)
+				buyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+
+				buyBtn.MouseButton1Click:Connect(function()
+					if buyRobuxRemote then
+						buyBtn.Text = "Processing..."
+						local ok, msg = buyRobuxRemote:InvokeServer(item.Id)
+						if ok then
+							showToast("🎉 " .. msg, false)
+							renderRobuxShopContent()
+							updateHUD()
+						else
+							showToast(msg or "Purchase failed", true)
+							buyBtn.Text = string.format("R$ %d", item.Robux)
+						end
+					end
+				end)
+			end
+		end
+	end
+end
+
+-- Garage & In-Game Dealership Content Renderer
+function renderGarageContent()
+	if not garageBodyFrame then
+		return
+	end
+	garageBodyFrame:ClearAllChildren()
+
+	local allCars = CarCatalog.getAll()
+
+	if garageCurrentTab == "GARAGE" then
+		-- TAB 1: MY CARS (Spawn, customize, view owned cars)
+		local ownedList = {}
+		for _, car in allCars do
+			if localData.OwnedCars[car.Id] then
+				table.insert(ownedList, car)
+			end
+		end
+
+		local listContainer = make("ScrollingFrame", {
+			Size = UDim2.new(0.35, 0, 1, 0),
+			BackgroundTransparency = 1,
+			ScrollBarThickness = 5,
+			ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
+			BorderSizePixel = 0,
+			Parent = garageBodyFrame,
+		})
+
+		local detailContainer = make("Frame", {
+			Position = UDim2.new(0.38, 0, 0, 0),
+			Size = UDim2.new(0.62, 0, 1, 0),
+			BackgroundColor3 = THEME.BgCard,
+			BorderSizePixel = 0,
+			Parent = garageBodyFrame,
+		})
+		addCorner(detailContainer, 10)
+		addStroke(detailContainer, THEME.Stroke, THEME.StrokeTrans)
+
+		if #ownedList == 0 then
+			make("TextLabel", {
+				Size = UDim2.new(1, 0, 1, 0),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = "No vehicles in your garage!
+Visit the Dealership tab to buy cars.",
+				TextColor3 = THEME.TextSecondary,
+				TextSize = 13,
+				Parent = listContainer,
+			})
+			return
+		end
+
+		if not localData.OwnedCars[selectedGarageCarId] then
+			selectedGarageCarId = ownedList[1].Id
+		end
+
+		make("UIListLayout", {
+			Padding = UDim.new(0, 10),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = listContainer,
+		})
+
+		for i, car in ownedList do
+			local isSelected = car.Id == selectedGarageCarId
+			local item = make("TextButton", {
+				Name = car.Id,
+				Size = UDim2.new(1, 0, 0, 60),
+				BackgroundColor3 = if isSelected then THEME.BgCardHover else THEME.BgCard,
+				BorderSizePixel = 0,
+				Text = "",
+				AutoButtonColor = false,
+				LayoutOrder = i,
+				Parent = listContainer,
+			})
+			addCorner(item, 8)
+			addStroke(item, if isSelected then THEME.Accent else THEME.Stroke, if isSelected then 0.2 else THEME.StrokeTrans, if isSelected then 2 else 1)
+
+			local ind = make("Frame", {
+				Position = UDim2.new(0, 6, 0.5, -18),
+				Size = UDim2.new(0, 6, 0, 36),
+				BackgroundColor3 = car.AccentColor,
+				BorderSizePixel = 0,
+				Parent = item,
+			})
+			addCorner(ind, 3)
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 20, 0, 12),
+				Size = UDim2.new(1, -30, 0, 20),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = car.DisplayName,
+				TextColor3 = if isSelected then THEME.TextPrimary else THEME.TextSecondary,
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = item,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 20, 0, 32),
+				Size = UDim2.new(1, -30, 0, 16),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+				Text = string.format("%s Class • %d studs/s", car.Tier, car.TopSpeed),
+				TextColor3 = THEME.TextMuted,
+				TextSize = 11,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = item,
+			})
+
+			item.MouseButton1Click:Connect(function()
+				selectedGarageCarId = car.Id
+				renderGarageContent()
+			end)
+		end
+
+		-- Right detail panel for selected vehicle
+		local currentCar = CarCatalog.get(selectedGarageCarId) or ownedList[1]
+		if not selectedGaragePaint then
+			selectedGaragePaint = currentCar.DefaultColor
+		end
+
+		make("TextLabel", {
+			Position = UDim2.new(0, 16, 0, 16),
+			Size = UDim2.new(1, -32, 0, 24),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+			Text = currentCar.DisplayName,
+			TextColor3 = THEME.TextPrimary,
+			TextSize = 18,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = detailContainer,
+		})
+
+		make("TextLabel", {
+			Position = UDim2.new(0, 16, 0, 42),
+			Size = UDim2.new(1, -32, 0, 16),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+			Text = currentCar.Subtitle,
+			TextColor3 = currentCar.AccentColor,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = detailContainer,
+		})
+
+		local specBox = make("Frame", {
+			Position = UDim2.new(0, 16, 0, 68),
+			Size = UDim2.new(1, -32, 0, 88),
+			BackgroundColor3 = Color3.fromRGB(18, 22, 30),
+			BorderSizePixel = 0,
+			Parent = detailContainer,
+		})
+		addCorner(specBox, 8)
+		addStroke(specBox, THEME.Stroke, THEME.StrokeTrans)
+
+		local function addBoxSpec(col: number, row: number, name: string, val: string)
+			local x = col == 1 and 16 or 0.52
+			local y = row == 1 and 12 or 50
+			make("TextLabel", {
+				Position = UDim2.new(x, 0, 0, y),
+				Size = UDim2.new(0.45, 0, 0, 14),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+				Text = name,
+				TextColor3 = THEME.TextMuted,
+				TextSize = 11,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = specBox,
 			})
 			make("TextLabel", {
-				Position = UDim2.new(0.5, 0, 0, y),
-				Size = UDim2.new(0.5, -8, 0, 20),
+				Position = UDim2.new(x, 0, 0, y + 16),
+				Size = UDim2.new(0.45, 0, 0, 16),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamBold),
 				Text = val,
 				TextColor3 = THEME.TextPrimary,
-				TextSize = 11,
-				TextXAlignment = Enum.TextXAlignment.Right,
-				Parent = specs,
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = specBox,
 			})
 		end
 
-		specLine(6, "Top Speed", string.format("%d studs/s", car.TopSpeed))
-		specLine(30, "Acceleration", tostring(car.Acceleration))
-		specLine(54, "Cornering Grip", tostring(car.Grip))
-		specLine(78, "Drive Type", car.DriveType)
+		addBoxSpec(1, 1, "Top Speed", string.format("%d studs/s", currentCar.TopSpeed))
+		addBoxSpec(2, 1, "Acceleration", tostring(currentCar.Acceleration))
+		addBoxSpec(1, 2, "Cornering Grip", tostring(currentCar.Grip))
+		addBoxSpec(2, 2, "Drivetrain", currentCar.DriveType)
 
-		-- Buy Action Button
-		local actionBtn = make("TextButton", {
-			Position = UDim2.new(0, 12, 1, -40),
-			Size = UDim2.new(1, -24, 0, 30),
-			FontFace = Font.fromEnum(Enum.Font.GothamBold),
-			TextSize = 12,
-			BorderSizePixel = 0,
-			Parent = card,
-		})
-		addCorner(actionBtn, 6)
-
-		if isOwned then
-			actionBtn.BackgroundColor3 = Color3.fromRGB(28, 48, 38)
-			actionBtn.Text = "OWNED ✓"
-			actionBtn.TextColor3 = THEME.Green
-			actionBtn.MouseButton1Click:Connect(function()
-				selectedGarageCarId = car.Id
-				openModal(garageModal)
-			end)
-		elseif canAfford then
-			actionBtn.BackgroundColor3 = THEME.Accent
-			actionBtn.Text = if car.Price == 0 then "CLAIM FREE" else "PURCHASE"
-			actionBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-
-			actionBtn.MouseButton1Click:Connect(function()
-				if buyRemote then
-					actionBtn.Text = "Purchasing..."
-					local ok, msg = buyRemote:InvokeServer(car.Id)
-					if ok then
-						showToast("🎉 " .. msg, false)
-						renderShopContent()
-						updateHUD()
-					else
-						showToast(msg or "Purchase failed", true)
-						renderShopContent()
-					end
-				end
-			end)
-		else
-			actionBtn.BackgroundColor3 = Color3.fromRGB(38, 40, 48)
-			actionBtn.Text = string.format("NEED %s MORE", formatCash(car.Price - localData.Cash))
-			actionBtn.TextColor3 = THEME.TextMuted
-			actionBtn.AutoButtonColor = false
-		end
-	end
-end
-
--- Garage Content Renderer
-function renderGarageContent()
-	if not garageListContainer or not garageDetailContainer then
-		return
-	end
-	garageListContainer:ClearAllChildren()
-	garageDetailContainer:ClearAllChildren()
-
-	local allCars = CarCatalog.getAll()
-	local ownedList = {}
-	for _, car in allCars do
-		if localData.OwnedCars[car.Id] then
-			table.insert(ownedList, car)
-		end
-	end
-
-	if #ownedList == 0 then
 		make("TextLabel", {
-			Size = UDim2.new(1, 0, 1, 0),
+			Position = UDim2.new(0, 16, 0, 168),
+			Size = UDim2.new(1, -32, 0, 18),
 			BackgroundTransparency = 1,
 			FontFace = Font.fromEnum(Enum.Font.GothamBold),
-			Text = "No vehicles in your garage yet!\nVisit the Shop to acquire vehicles.",
+			Text = "CUSTOMIZE PAINT COLOR",
 			TextColor3 = THEME.TextSecondary,
-			TextSize = 14,
-			Parent = garageListContainer,
-		})
-		return
-	end
-
-	-- Verify selected car is owned
-	if not localData.OwnedCars[selectedGarageCarId] then
-		selectedGarageCarId = ownedList[1].Id
-	end
-
-	local listLayout = make("UIListLayout", {
-		Padding = UDim.new(0, 10),
-		SortOrder = Enum.SortOrder.LayoutOrder,
-		Parent = garageListContainer,
-	})
-
-	for i, car in ownedList do
-		local isSelected = car.Id == selectedGarageCarId
-		local item = make("TextButton", {
-			Name = car.Id,
-			Size = UDim2.new(1, 0, 0, 60),
-			BackgroundColor3 = if isSelected then THEME.BgCardHover else THEME.BgCard,
-			BorderSizePixel = 0,
-			Text = "",
-			AutoButtonColor = false,
-			LayoutOrder = i,
-			Parent = garageListContainer,
-		})
-		addCorner(item, 8)
-		addStroke(item, if isSelected then THEME.Accent else THEME.Stroke, if isSelected then 0.2 else THEME.StrokeTrans, if isSelected then 2 else 1)
-
-		-- Left color indicator
-		local ind = make("Frame", {
-			Position = UDim2.new(0, 6, 0.5, -18),
-			Size = UDim2.new(0, 6, 0, 36),
-			BackgroundColor3 = car.AccentColor,
-			BorderSizePixel = 0,
-			Parent = item,
-		})
-		addCorner(ind, 3)
-
-		make("TextLabel", {
-			Position = UDim2.new(0, 20, 0, 12),
-			Size = UDim2.new(1, -30, 0, 20),
-			BackgroundTransparency = 1,
-			FontFace = Font.fromEnum(Enum.Font.GothamBold),
-			Text = car.DisplayName,
-			TextColor3 = if isSelected then THEME.TextPrimary else THEME.TextSecondary,
-			TextSize = 13,
+			TextSize = 12,
 			TextXAlignment = Enum.TextXAlignment.Left,
-			Parent = item,
+			Parent = detailContainer,
 		})
 
-		make("TextLabel", {
-			Position = UDim2.new(0, 20, 0, 32),
-			Size = UDim2.new(1, -30, 0, 16),
+		local swatchesFrame = make("Frame", {
+			Position = UDim2.new(0, 16, 0, 192),
+			Size = UDim2.new(1, -32, 0, 48),
 			BackgroundTransparency = 1,
-			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
-			Text = string.format("%s Class • %d studs/s", car.Tier, car.TopSpeed),
-			TextColor3 = THEME.TextMuted,
-			TextSize = 11,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Parent = item,
+			Parent = detailContainer,
 		})
-
-		item.MouseButton1Click:Connect(function()
-			selectedGarageCarId = car.Id
-			renderGarageContent()
-		end)
-	end
-
-	-- RIGHT DETAIL PANEL FOR SELECTED CAR
-	local currentCar = CarCatalog.get(selectedGarageCarId) or ownedList[1]
-	if not selectedGaragePaint then
-		selectedGaragePaint = currentCar.DefaultColor
-	end
-
-	-- Title
-	make("TextLabel", {
-		Position = UDim2.new(0, 16, 0, 16),
-		Size = UDim2.new(1, -32, 0, 24),
-		BackgroundTransparency = 1,
-		FontFace = Font.fromEnum(Enum.Font.GothamBlack),
-		Text = currentCar.DisplayName,
-		TextColor3 = THEME.TextPrimary,
-		TextSize = 18,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = garageDetailContainer,
-	})
-
-	make("TextLabel", {
-		Position = UDim2.new(0, 16, 0, 42),
-		Size = UDim2.new(1, -32, 0, 16),
-		BackgroundTransparency = 1,
-		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
-		Text = currentCar.Subtitle,
-		TextColor3 = currentCar.AccentColor,
-		TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = garageDetailContainer,
-	})
-
-	-- Detailed Specs Grid
-	local specBox = make("Frame", {
-		Position = UDim2.new(0, 16, 0, 68),
-		Size = UDim2.new(1, -32, 0, 90),
-		BackgroundColor3 = Color3.fromRGB(18, 22, 30),
-		BorderSizePixel = 0,
-		Parent = garageDetailContainer,
-	})
-	addCorner(specBox, 8)
-	addStroke(specBox, THEME.Stroke, THEME.StrokeTrans)
-
-	local function addBoxSpec(col: number, row: number, name: string, val: string)
-		local x = col == 1 and 16 or 0.52
-		local y = row == 1 and 12 or 50
-		make("TextLabel", {
-			Position = UDim2.new(x, 0, 0, y),
-			Size = UDim2.new(0.45, 0, 0, 14),
-			BackgroundTransparency = 1,
-			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
-			Text = name,
-			TextColor3 = THEME.TextMuted,
-			TextSize = 11,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Parent = specBox,
-		})
-		make("TextLabel", {
-			Position = UDim2.new(x, 0, 0, y + 16),
-			Size = UDim2.new(0.45, 0, 0, 16),
-			BackgroundTransparency = 1,
-			FontFace = Font.fromEnum(Enum.Font.GothamBold),
-			Text = val,
-			TextColor3 = THEME.TextPrimary,
-			TextSize = 13,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Parent = specBox,
-		})
-	end
-
-	addBoxSpec(1, 1, "Top Speed", string.format("%d studs/s", currentCar.TopSpeed))
-	addBoxSpec(2, 1, "Acceleration", tostring(currentCar.Acceleration))
-	addBoxSpec(1, 2, "Cornering Grip", tostring(currentCar.Grip))
-	addBoxSpec(2, 2, "Drivetrain", currentCar.DriveType)
-
-	-- Paint Customizer Header
-	make("TextLabel", {
-		Position = UDim2.new(0, 16, 0, 172),
-		Size = UDim2.new(1, -32, 0, 18),
-		BackgroundTransparency = 1,
-		FontFace = Font.fromEnum(Enum.Font.GothamBold),
-		Text = "CUSTOMIZE PAINT COLOR",
-		TextColor3 = THEME.TextSecondary,
-		TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = garageDetailContainer,
-	})
-
-	-- Swatch palette
-	local swatchesFrame = make("Frame", {
-		Position = UDim2.new(0, 16, 0, 196),
-		Size = UDim2.new(1, -32, 0, 48),
-		BackgroundTransparency = 1,
-		Parent = garageDetailContainer,
-	})
-	make("UIListLayout", {
-		FillDirection = Enum.FillDirection.Horizontal,
-		HorizontalAlignment = Enum.HorizontalAlignment.Left,
-		Padding = UDim.new(0, 10),
-		Parent = swatchesFrame,
-	})
-
-	for _, preset in PAINT_PRESETS do
-		local isCurrentColor = selectedGaragePaint == preset.Color
-		local swatch = make("TextButton", {
-			Size = UDim2.new(0, 36, 0, 36),
-			BackgroundColor3 = preset.Color,
-			BorderSizePixel = 0,
-			Text = "",
+		make("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Left,
+			Padding = UDim.new(0, 10),
 			Parent = swatchesFrame,
 		})
-		addCorner(swatch, 18)
-		local swatchStroke = addStroke(swatch, if isCurrentColor then Color3.fromRGB(255, 255, 255) else Color3.fromRGB(0, 0, 0), if isCurrentColor then 0 else 0.5, if isCurrentColor then 3 else 1)
 
-		swatch.MouseButton1Click:Connect(function()
-			selectedGaragePaint = preset.Color
-			renderGarageContent()
+		for _, preset in PAINT_PRESETS do
+			local isCurrentColor = selectedGaragePaint == preset.Color
+			local swatch = make("TextButton", {
+				Size = UDim2.new(0, 34, 0, 34),
+				BackgroundColor3 = preset.Color,
+				BorderSizePixel = 0,
+				Text = "",
+				Parent = swatchesFrame,
+			})
+			addCorner(swatch, 17)
+			addStroke(swatch, if isCurrentColor then Color3.fromRGB(255, 255, 255) else Color3.fromRGB(0, 0, 0), if isCurrentColor then 0 else 0.5, if isCurrentColor then 3 else 1)
+
+			swatch.MouseButton1Click:Connect(function()
+				selectedGaragePaint = preset.Color
+				renderGarageContent()
+			end)
+		end
+
+		local spawnBtn = make("TextButton", {
+			Position = UDim2.new(0, 16, 1, -48),
+			Size = UDim2.new(0.68, -20, 0, 36),
+			BackgroundColor3 = THEME.Accent,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = "🚗 SPAWN VEHICLE",
+			TextColor3 = Color3.fromRGB(255, 255, 255),
+			TextSize = 13,
+			BorderSizePixel = 0,
+			Parent = detailContainer,
+		})
+		addCorner(spawnBtn, 8)
+
+		spawnBtn.MouseButton1Click:Connect(function()
+			if spawnRemote then
+				spawnBtn.Text = "Spawning..."
+				local ok, msg = spawnRemote:InvokeServer(currentCar.Id, selectedGaragePaint)
+				if ok then
+					showToast("🚗 " .. msg, false)
+					closeModal()
+				else
+					showToast(msg or "Failed to spawn vehicle", true)
+				end
+				spawnBtn.Text = "🚗 SPAWN VEHICLE"
+			end
 		end)
+
+		local despawnBtn = make("TextButton", {
+			Position = UDim2.new(0.68, 4, 1, -48),
+			Size = UDim2.new(0.32, -20, 0, 36),
+			BackgroundColor3 = Color3.fromRGB(42, 46, 58),
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = "🗑️ STORE",
+			TextColor3 = THEME.TextSecondary,
+			TextSize = 12,
+			BorderSizePixel = 0,
+			Parent = detailContainer,
+		})
+		addCorner(despawnBtn, 8)
+
+		despawnBtn.MouseButton1Click:Connect(function()
+			if despawnRemote then
+				local ok, msg = despawnRemote:InvokeServer()
+				if ok then
+					showToast("Stored vehicle in garage", false)
+				else
+					showToast(msg or "No vehicle to store", true)
+				end
+			end
+		end)
+	else
+		-- TAB 2: DEALERSHIP (Buy cars with in-game Cash)
+		local dealScroll = make("ScrollingFrame", {
+			Size = UDim2.new(1, 0, 1, 0),
+			BackgroundTransparency = 1,
+			ScrollBarThickness = 6,
+			ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
+			BorderSizePixel = 0,
+			Parent = garageBodyFrame,
+		})
+
+		make("UIGridLayout", {
+			CellSize = UDim2.new(0, 240, 0, 270),
+			CellPadding = UDim2.new(0, 14, 0, 14),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = dealScroll,
+		})
+
+		for i, car in allCars do
+			local isOwned = localData.OwnedCars[car.Id] == true
+			local canAfford = localData.Cash >= car.Price
+
+			local card = make("Frame", {
+				Name = car.Id,
+				BackgroundColor3 = THEME.BgCard,
+				BorderSizePixel = 0,
+				LayoutOrder = i,
+				Parent = dealScroll,
+			})
+			addCorner(card, 10)
+			addStroke(card, THEME.Stroke, THEME.StrokeTrans)
+
+			local bar = make("Frame", {
+				Size = UDim2.new(1, 0, 0, 4),
+				BackgroundColor3 = car.AccentColor,
+				BorderSizePixel = 0,
+				Parent = card,
+			})
+			addCorner(bar, 4)
+
+			local tier = make("TextLabel", {
+				Position = UDim2.new(0, 12, 0, 12),
+				Size = UDim2.new(0, 68, 0, 18),
+				BackgroundColor3 = Color3.fromRGB(35, 42, 58),
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = string.upper(car.Tier),
+				TextColor3 = car.AccentColor,
+				TextSize = 10,
+				Parent = card,
+			})
+			addCorner(tier, 4)
+
+			make("TextLabel", {
+				Position = UDim2.new(1, -115, 0, 12),
+				Size = UDim2.new(0, 103, 0, 18),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+				Text = if car.Price == 0 then "FREE" else formatCash(car.Price),
+				TextColor3 = THEME.Gold,
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Right,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 12, 0, 36),
+				Size = UDim2.new(1, -24, 0, 22),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				Text = car.DisplayName,
+				TextColor3 = THEME.TextPrimary,
+				TextSize = 14,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Parent = card,
+			})
+
+			make("TextLabel", {
+				Position = UDim2.new(0, 12, 0, 60),
+				Size = UDim2.new(1, -24, 0, 32),
+				BackgroundTransparency = 1,
+				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+				Text = car.Description,
+				TextColor3 = THEME.TextSecondary,
+				TextSize = 10,
+				TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Top,
+				Parent = card,
+			})
+
+			local specs = make("Frame", {
+				Position = UDim2.new(0, 12, 0, 100),
+				Size = UDim2.new(1, -24, 0, 110),
+				BackgroundColor3 = Color3.fromRGB(18, 21, 28),
+				BorderSizePixel = 0,
+				Parent = card,
+			})
+			addCorner(specs, 6)
+
+			local function specLine(y: number, label: string, val: string)
+				make("TextLabel", {
+					Position = UDim2.new(0, 8, 0, y),
+					Size = UDim2.new(0.5, -8, 0, 20),
+					BackgroundTransparency = 1,
+					FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+					Text = label,
+					TextColor3 = THEME.TextSecondary,
+					TextSize = 11,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					Parent = specs,
+				})
+				make("TextLabel", {
+					Position = UDim2.new(0.5, 0, 0, y),
+					Size = UDim2.new(0.5, -8, 0, 20),
+					BackgroundTransparency = 1,
+					FontFace = Font.fromEnum(Enum.Font.GothamBold),
+					Text = val,
+					TextColor3 = THEME.TextPrimary,
+					TextSize = 11,
+					TextXAlignment = Enum.TextXAlignment.Right,
+					Parent = specs,
+				})
+			end
+
+			specLine(6, "Top Speed", string.format("%d studs/s", car.TopSpeed))
+			specLine(30, "Acceleration", tostring(car.Acceleration))
+			specLine(54, "Cornering Grip", tostring(car.Grip))
+			specLine(78, "Drive Type", car.DriveType)
+
+			local actionBtn = make("TextButton", {
+				Position = UDim2.new(0, 12, 1, -40),
+				Size = UDim2.new(1, -24, 0, 30),
+				FontFace = Font.fromEnum(Enum.Font.GothamBold),
+				TextSize = 12,
+				BorderSizePixel = 0,
+				Parent = card,
+			})
+			addCorner(actionBtn, 6)
+
+			if isOwned then
+				actionBtn.BackgroundColor3 = Color3.fromRGB(28, 48, 38)
+				actionBtn.Text = "OWNED ✓ (SELECT)"
+				actionBtn.TextColor3 = THEME.Green
+				actionBtn.MouseButton1Click:Connect(function()
+					selectedGarageCarId = car.Id
+					garageCurrentTab = "GARAGE"
+					renderGarageContent()
+				end)
+			elseif canAfford then
+				actionBtn.BackgroundColor3 = THEME.Accent
+				actionBtn.Text = if car.Price == 0 then "CLAIM FREE" else "PURCHASE FOR CASH"
+				actionBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+
+				actionBtn.MouseButton1Click:Connect(function()
+					if buyRemote then
+						actionBtn.Text = "Purchasing..."
+						local ok, msg = buyRemote:InvokeServer(car.Id)
+						if ok then
+							showToast("🎉 " .. msg, false)
+							selectedGarageCarId = car.Id
+							renderGarageContent()
+							updateHUD()
+						else
+							showToast(msg or "Purchase failed", true)
+							renderGarageContent()
+						end
+					end
+				end)
+			else
+				actionBtn.BackgroundColor3 = Color3.fromRGB(38, 40, 48)
+				actionBtn.Text = string.format("NEED %s MORE", formatCash(car.Price - localData.Cash))
+				actionBtn.TextColor3 = THEME.TextMuted
+				actionBtn.AutoButtonColor = false
+			end
+		end
 	end
-
-	-- Action Buttons: SPAWN & DESPAWN
-	local spawnBtn = make("TextButton", {
-		Position = UDim2.new(0, 16, 1, -50),
-		Size = UDim2.new(0.68, -20, 0, 38),
-		BackgroundColor3 = THEME.Accent,
-		FontFace = Font.fromEnum(Enum.Font.GothamBold),
-		Text = "🚗 SPAWN VEHICLE",
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		TextSize = 13,
-		BorderSizePixel = 0,
-		Parent = garageDetailContainer,
-	})
-	addCorner(spawnBtn, 8)
-
-	spawnBtn.MouseButton1Click:Connect(function()
-		if spawnRemote then
-			spawnBtn.Text = "Spawning..."
-			local ok, msg = spawnRemote:InvokeServer(currentCar.Id, selectedGaragePaint)
-			if ok then
-				showToast("🚗 " .. msg, false)
-				closeModal()
-			else
-				showToast(msg or "Failed to spawn vehicle", true)
-			end
-			spawnBtn.Text = "🚗 SPAWN VEHICLE"
-		end
-	end)
-
-	local despawnBtn = make("TextButton", {
-		Position = UDim2.new(0.68, 4, 1, -50),
-		Size = UDim2.new(0.32, -20, 0, 38),
-		BackgroundColor3 = Color3.fromRGB(42, 46, 58),
-		FontFace = Font.fromEnum(Enum.Font.GothamBold),
-		Text = "🗑️ STORE",
-		TextColor3 = THEME.TextSecondary,
-		TextSize = 12,
-		BorderSizePixel = 0,
-		Parent = garageDetailContainer,
-	})
-	addCorner(despawnBtn, 8)
-
-	despawnBtn.MouseButton1Click:Connect(function()
-		if despawnRemote then
-			local ok, msg = despawnRemote:InvokeServer()
-			if ok then
-				showToast("Stored vehicle in garage", false)
-			else
-				showToast(msg or "No vehicle to store", true)
-			end
-		end
-	end)
 end
 
 -- Build the Full Screen GUI
@@ -988,7 +1234,7 @@ local function buildInterface()
 		Name = "MainGameGui",
 		ResetOnSpawn = false,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		IgnoreGuiInset = true,
+		IgnoreGuiInset = false, -- Respect Roblox TopBar insets!
 		Parent = playerGui,
 	})
 
@@ -1009,7 +1255,7 @@ local function buildInterface()
 		Name = "Toast",
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, -60),
-		Size = UDim2.new(0, 340, 0, 42),
+		Size = UDim2.new(0, 360, 0, 44),
 		BackgroundColor3 = Color3.fromRGB(20, 25, 35),
 		BorderSizePixel = 0,
 		Visible = false,
@@ -1031,49 +1277,14 @@ local function buildInterface()
 		Parent = toastFrame,
 	})
 
-	-- TOP CASH PILL
-	local cashPill = make("Frame", {
-		Name = "CashPill",
-		Position = UDim2.new(0, 24, 0, 24),
-		Size = UDim2.new(0, 165, 0, 42),
-		BackgroundColor3 = THEME.BgCard,
-		BorderSizePixel = 0,
-		ZIndex = 10,
-		Parent = screenGui,
-	})
-	addCorner(cashPill, 21)
-	addStroke(cashPill, THEME.Stroke, THEME.StrokeTrans)
-
-	local coinIcon = make("TextLabel", {
-		Position = UDim2.new(0, 12, 0.5, -12),
-		Size = UDim2.new(0, 24, 0, 24),
-		BackgroundTransparency = 1,
-		FontFace = Font.fromEnum(Enum.Font.GothamBlack),
-		Text = "💵",
-		TextSize = 18,
-		Parent = cashPill,
-	})
-
-	cashTextLabel = make("TextLabel", {
-		Position = UDim2.new(0, 42, 0, 0),
-		Size = UDim2.new(1, -52, 1, 0),
-		BackgroundTransparency = 1,
-		FontFace = Font.fromEnum(Enum.Font.GothamBlack),
-		Text = "$0",
-		TextColor3 = THEME.Gold,
-		TextSize = 15,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = cashPill,
-	})
-
-	-- LEFT NAVIGATION DOCK
+	-- LEFT NAVIGATION DOCK (Non-overlapping, vertically centered on left)
 	local navDock = make("Frame", {
 		Name = "NavDock",
 		AnchorPoint = Vector2.new(0, 0.5),
-		Position = UDim2.new(0, 24, 0.5, 0),
-		Size = UDim2.new(0, 140, 0, 260),
+		Position = UDim2.new(0, 20, 0.5, 0),
+		Size = UDim2.new(0, 150, 0, 310),
 		BackgroundColor3 = THEME.BgModal,
-		BackgroundTransparency = 0.15,
+		BackgroundTransparency = 0.12,
 		BorderSizePixel = 0,
 		ZIndex = 10,
 		Parent = screenGui,
@@ -1082,45 +1293,111 @@ local function buildInterface()
 	addStroke(navDock, THEME.Stroke, THEME.StrokeTrans)
 
 	local navList = make("UIListLayout", {
-		Padding = UDim.new(0, 8),
+		Padding = UDim.new(0, 6),
 		HorizontalAlignment = Enum.HorizontalAlignment.Center,
 		VerticalAlignment = Enum.VerticalAlignment.Center,
 		Parent = navDock,
 	})
 
-	local function makeNavButton(name: string, label: string, icon: string, isPrimary: boolean?): (TextButton, TextLabel?)
+	-- CASH DISPLAY AT THE TOP OF THE DOCK
+	local cashCard = make("Frame", {
+		Name = "DockCashHeader",
+		Size = UDim2.new(0, 134, 0, 52),
+		BackgroundColor3 = THEME.BgCard,
+		BorderSizePixel = 0,
+		LayoutOrder = 1,
+		Parent = navDock,
+	})
+	addCorner(cashCard, 10)
+	addStroke(cashCard, THEME.Gold, 0.6)
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 8, 0, 6),
+		Size = UDim2.new(1, -16, 0, 14),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "BALANCE",
+		TextColor3 = THEME.TextMuted,
+		TextSize = 9,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = cashCard,
+	})
+
+	dockCashLabel = make("TextLabel", {
+		Position = UDim2.new(0, 8, 0, 20),
+		Size = UDim2.new(1, -16, 0, 22),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+		Text = "$0",
+		TextColor3 = THEME.Gold,
+		TextSize = 15,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = cashCard,
+	})
+
+	dockMultBadge = make("Frame", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -6, 0, 6),
+		Size = UDim2.new(0, 38, 0, 16),
+		BackgroundColor3 = Color3.fromRGB(50, 42, 10),
+		BorderSizePixel = 0,
+		Visible = false,
+		Parent = cashCard,
+	})
+	addCorner(dockMultBadge, 4)
+	addStroke(dockMultBadge, THEME.Gold, 0.4)
+
+	make("TextLabel", {
+		Size = UDim2.new(1, 0, 1, 0),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "⚡ 2X",
+		TextColor3 = THEME.Gold,
+		TextSize = 10,
+		Parent = dockMultBadge,
+	})
+
+	-- Divider line
+	local div = make("Frame", {
+		Size = UDim2.new(0, 134, 0, 1),
+		BackgroundColor3 = Color3.fromRGB(45, 50, 65),
+		BorderSizePixel = 0,
+		LayoutOrder = 2,
+		Parent = navDock,
+	})
+
+	local function makeNavButton(order: number, name: string, label: string, icon: string, isPrimary: boolean?): (TextButton, TextLabel?)
 		local btn = make("TextButton", {
 			Name = name,
-			Size = UDim2.new(0, 120, 0, 46),
+			Size = UDim2.new(0, 134, 0, 44),
 			BackgroundColor3 = if isPrimary then THEME.Accent else THEME.BgCard,
 			BorderSizePixel = 0,
 			Text = "",
 			AutoButtonColor = true,
+			LayoutOrder = order,
 			Parent = navDock,
 		})
 		addCorner(btn, 10)
 		addStroke(btn, if isPrimary then THEME.Accent else THEME.Stroke, if isPrimary then 0.3 else THEME.StrokeTrans)
 
-		-- Icon
 		make("TextLabel", {
-			Position = UDim2.new(0, 10, 0.5, -12),
-			Size = UDim2.new(0, 24, 0, 24),
+			Position = UDim2.new(0, 10, 0.5, -11),
+			Size = UDim2.new(0, 22, 0, 22),
 			BackgroundTransparency = 1,
 			FontFace = Font.fromEnum(Enum.Font.GothamBold),
 			Text = icon,
-			TextSize = 18,
+			TextSize = 16,
 			Parent = btn,
 		})
 
-		-- Label
 		make("TextLabel", {
-			Position = UDim2.new(0, 38, 0, 0),
-			Size = UDim2.new(1, -44, 1, 0),
+			Position = UDim2.new(0, 36, 0, 0),
+			Size = UDim2.new(1, -42, 1, 0),
 			BackgroundTransparency = 1,
 			FontFace = Font.fromEnum(Enum.Font.GothamBold),
 			Text = label,
 			TextColor3 = if isPrimary then Color3.fromRGB(255, 255, 255) else THEME.TextPrimary,
-			TextSize = 13,
+			TextSize = 12,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			Parent = btn,
 		})
@@ -1129,8 +1406,8 @@ local function buildInterface()
 		if name == "CardexBtn" then
 			badge = make("TextLabel", {
 				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -8, 0.5, 0),
-				Size = UDim2.new(0, 28, 0, 18),
+				Position = UDim2.new(1, -6, 0.5, 0),
+				Size = UDim2.new(0, 26, 0, 18),
 				BackgroundColor3 = Color3.fromRGB(35, 42, 58),
 				FontFace = Font.fromEnum(Enum.Font.GothamBold),
 				Text = "1/5",
@@ -1144,20 +1421,21 @@ local function buildInterface()
 		return btn, badge
 	end
 
-	local cardexBtn, badge = makeNavButton("CardexBtn", "CARDEX", "🗂️")
-	cardexBadge = badge
-	local shopBtn = makeNavButton("ShopBtn", "SHOP", "🛍️")
-	local garageBtn = makeNavButton("GarageBtn", "GARAGE", "🚘")
-	local playBtn = makeNavButton("PlayBtn", "PLAY", "▶", true)
+	local cardexBtn, cBadge = makeNavButton(3, "CardexBtn", "CARDEX", "🗂️")
+	dockCardexBadge = cBadge
+	local garageBtn = makeNavButton(4, "GarageBtn", "GARAGE", "🚘")
+	local shopBtn = makeNavButton(5, "ShopBtn", "ROBUX SHOP", "🛍️")
+	local playBtn = makeNavButton(6, "PlayBtn", "PLAY", "▶", true)
 
 	cardexBtn.MouseButton1Click:Connect(function()
 		openModal(cardexModal)
 	end)
+	garageBtn.MouseButton1Click:Connect(function()
+		garageCurrentTab = "GARAGE"
+		openModal(garageModal)
+	end)
 	shopBtn.MouseButton1Click:Connect(function()
 		openModal(shopModal)
-	end)
-	garageBtn.MouseButton1Click:Connect(function()
-		openModal(garageModal)
 	end)
 	playBtn.MouseButton1Click:Connect(function()
 		doPlayTeleport()
@@ -1177,7 +1455,7 @@ local function buildInterface()
 			Name = name,
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0.5, 0, 0.5, 0),
-			Size = UDim2.new(0, 840, 0, 520),
+			Size = UDim2.new(0, 860, 0, 520),
 			BackgroundColor3 = THEME.BgModal,
 			BackgroundTransparency = 0.05,
 			BorderSizePixel = 0,
@@ -1188,10 +1466,9 @@ local function buildInterface()
 		addCorner(modal, 14)
 		addStroke(modal, THEME.Stroke, THEME.StrokeTrans, 1.5)
 
-		-- Header
 		make("TextLabel", {
 			Position = UDim2.new(0, 24, 0, 18),
-			Size = UDim2.new(0, 400, 0, 24),
+			Size = UDim2.new(0, 450, 0, 24),
 			BackgroundTransparency = 1,
 			FontFace = Font.fromEnum(Enum.Font.GothamBlack),
 			Text = title,
@@ -1203,7 +1480,7 @@ local function buildInterface()
 
 		make("TextLabel", {
 			Position = UDim2.new(0, 24, 0, 44),
-			Size = UDim2.new(0, 400, 0, 16),
+			Size = UDim2.new(0, 450, 0, 16),
 			BackgroundTransparency = 1,
 			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
 			Text = subtitle,
@@ -1213,7 +1490,6 @@ local function buildInterface()
 			Parent = modal,
 		})
 
-		-- Close Button
 		local closeBtn = make("TextButton", {
 			AnchorPoint = Vector2.new(1, 0),
 			Position = UDim2.new(1, -20, 0, 18),
@@ -1232,12 +1508,11 @@ local function buildInterface()
 		return modal, closeBtn
 	end
 
-	-- 1. BUILD CARDEX MODAL
+	-- 1. CARDEX MODAL
 	cardexModal = makeBaseModal("CardexModal", "CARDEX VEHICLE COMPENDIUM", "All vehicles discovered and yet to be acquired in the world")
 
-	-- Progress Bar Header Container
 	local progressContainer = make("Frame", {
-		Position = UDim2.new(0, 24, 0, 72),
+		Position = UDim2.new(0, 24, 0, 70),
 		Size = UDim2.new(1, -48, 0, 32),
 		BackgroundColor3 = Color3.fromRGB(22, 26, 36),
 		BorderSizePixel = 0,
@@ -1275,9 +1550,8 @@ local function buildInterface()
 	})
 	addCorner(cardexProgressBar, 5)
 
-	-- Filter Buttons (ALL, OBTAINED, LOCKED)
 	local filterRow = make("Frame", {
-		Position = UDim2.new(0, 24, 0, 114),
+		Position = UDim2.new(0, 24, 0, 112),
 		Size = UDim2.new(1, -48, 0, 28),
 		BackgroundTransparency = 1,
 		Parent = cardexModal,
@@ -1291,7 +1565,7 @@ local function buildInterface()
 	local filterButtons = {}
 	local function addFilterChip(key: string, label: string)
 		local chip = make("TextButton", {
-			Size = UDim2.new(0, 100, 1, 0),
+			Size = UDim2.new(0, 110, 1, 0),
 			BackgroundColor3 = if cardexFilter == key then THEME.Accent else THEME.BgCard,
 			FontFace = Font.fromEnum(Enum.Font.GothamBold),
 			Text = label,
@@ -1317,10 +1591,9 @@ local function buildInterface()
 	addFilterChip("OBTAINED", "OBTAINED ✓")
 	addFilterChip("LOCKED", "LOCKED 🔒")
 
-	-- Scrolling Grid for Cardex
 	cardexCardContainer = make("ScrollingFrame", {
-		Position = UDim2.new(0, 24, 0, 150),
-		Size = UDim2.new(1, -48, 1, -165),
+		Position = UDim2.new(0, 24, 0, 148),
+		Size = UDim2.new(1, -48, 1, -162),
 		BackgroundTransparency = 1,
 		ScrollBarThickness = 6,
 		ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
@@ -1328,12 +1601,52 @@ local function buildInterface()
 		Parent = cardexModal,
 	})
 
-	-- 2. BUILD SHOP MODAL
-	shopModal = makeBaseModal("ShopModal", "VEHICLE DEALERSHIP", "Browse and purchase showroom cars with your earned cash")
+	-- 2. ROBUX SHOP MODAL (ONLY ROBUX ITEMS)
+	shopModal = makeBaseModal("ShopModal", "PREMIUM ROBUX STORE", "Acquire currency packs, gamepasses, and permanent multipliers")
 
-	shopCardContainer = make("ScrollingFrame", {
-		Position = UDim2.new(0, 24, 0, 80),
-		Size = UDim2.new(1, -48, 1, -95),
+	local shopTabRow = make("Frame", {
+		Position = UDim2.new(0, 24, 0, 70),
+		Size = UDim2.new(1, -48, 0, 32),
+		BackgroundTransparency = 1,
+		Parent = shopModal,
+	})
+	make("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 8),
+		Parent = shopTabRow,
+	})
+
+	local shopTabBtns = {}
+	local function addShopTab(tabKey: string, label: string)
+		local tBtn = make("TextButton", {
+			Size = UDim2.new(0, 140, 1, 0),
+			BackgroundColor3 = if robuxShopCurrentTab == tabKey then THEME.RobuxGreen else THEME.BgCard,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = label,
+			TextColor3 = if robuxShopCurrentTab == tabKey then Color3.fromRGB(255, 255, 255) else THEME.TextSecondary,
+			TextSize = 12,
+			BorderSizePixel = 0,
+			Parent = shopTabRow,
+		})
+		addCorner(tBtn, 6)
+		shopTabBtns[tabKey] = tBtn
+
+		tBtn.MouseButton1Click:Connect(function()
+			robuxShopCurrentTab = tabKey
+			for k, b in shopTabBtns do
+				b.BackgroundColor3 = if k == tabKey then THEME.RobuxGreen else THEME.BgCard
+				b.TextColor3 = if k == tabKey then Color3.fromRGB(255, 255, 255) else THEME.TextSecondary
+			end
+			renderRobuxShopContent()
+		end)
+	end
+
+	addShopTab("CASH", "💵 CASH PACKS")
+	addShopTab("PASSES", "⚡ GAMEPASSES & PERKS")
+
+	shopContentContainer = make("ScrollingFrame", {
+		Position = UDim2.new(0, 24, 0, 114),
+		Size = UDim2.new(1, -48, 1, -130),
 		BackgroundTransparency = 1,
 		ScrollBarThickness = 6,
 		ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
@@ -1341,28 +1654,55 @@ local function buildInterface()
 		Parent = shopModal,
 	})
 
-	-- 3. BUILD GARAGE MODAL
-	garageModal = makeBaseModal("GarageModal", "MY GARAGE", "Inspect, customize paint, and spawn your vehicles into the world")
+	-- 3. GARAGE MODAL (WITH DUAL TABS: MY CARS & IN-GAME DEALERSHIP)
+	garageModal = makeBaseModal("GarageModal", "GARAGE & SHOWROOM", "Manage owned vehicles, repaint, or purchase new models with Cash")
 
-	garageListContainer = make("ScrollingFrame", {
-		Position = UDim2.new(0, 24, 0, 80),
-		Size = UDim2.new(0.35, 0, 1, -95),
+	local garageTabRow = make("Frame", {
+		Position = UDim2.new(0, 24, 0, 70),
+		Size = UDim2.new(1, -48, 0, 32),
 		BackgroundTransparency = 1,
-		ScrollBarThickness = 5,
-		ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
-		BorderSizePixel = 0,
 		Parent = garageModal,
+	})
+	make("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 8),
+		Parent = garageTabRow,
 	})
 
-	garageDetailContainer = make("Frame", {
-		Position = UDim2.new(0.38, 0, 0, 80),
-		Size = UDim2.new(0.62, -24, 1, -95),
-		BackgroundColor3 = THEME.BgCard,
-		BorderSizePixel = 0,
+	local garageTabBtns = {}
+	local function addGarageTab(tabKey: string, label: string)
+		local gBtn = make("TextButton", {
+			Size = UDim2.new(0, 140, 1, 0),
+			BackgroundColor3 = if garageCurrentTab == tabKey then THEME.Accent else THEME.BgCard,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = label,
+			TextColor3 = if garageCurrentTab == tabKey then Color3.fromRGB(255, 255, 255) else THEME.TextSecondary,
+			TextSize = 12,
+			BorderSizePixel = 0,
+			Parent = garageTabRow,
+		})
+		addCorner(gBtn, 6)
+		garageTabBtns[tabKey] = gBtn
+
+		gBtn.MouseButton1Click:Connect(function()
+			garageCurrentTab = tabKey
+			for k, b in garageTabBtns do
+				b.BackgroundColor3 = if k == tabKey then THEME.Accent else THEME.BgCard
+				b.TextColor3 = if k == tabKey then Color3.fromRGB(255, 255, 255) else THEME.TextSecondary
+			end
+			renderGarageContent()
+		end)
+	end
+
+	addGarageTab("GARAGE", "🚘 MY VEHICLES")
+	addGarageTab("DEALERSHIP", "🏪 DEALERSHIP (CASH)")
+
+	garageBodyFrame = make("Frame", {
+		Position = UDim2.new(0, 24, 0, 114),
+		Size = UDim2.new(1, -48, 1, -130),
+		BackgroundTransparency = 1,
 		Parent = garageModal,
 	})
-	addCorner(garageDetailContainer, 10)
-	addStroke(garageDetailContainer, THEME.Stroke, THEME.StrokeTrans)
 
 	-- Hotkeys: Escape to close modals, M to toggle menu
 	UserInputService.InputBegan:Connect(function(input, processed)
@@ -1392,6 +1732,7 @@ local function connectRemotes()
 	syncRemote = remotesFolder:WaitForChild("PlayerDataSync", 5) :: RemoteEvent
 	getDataRemote = remotesFolder:WaitForChild("GetPlayerData", 5) :: RemoteFunction
 	buyRemote = remotesFolder:WaitForChild("BuyCar", 5) :: RemoteFunction
+	buyRobuxRemote = remotesFolder:WaitForChild("BuyRobuxProduct", 5) :: RemoteFunction
 	spawnRemote = remotesFolder:WaitForChild("SpawnCar", 5) :: RemoteFunction
 	despawnRemote = remotesFolder:WaitForChild("DespawnCar", 5) :: RemoteFunction
 	teleportRemote = remotesFolder:WaitForChild("TeleportToPlay", 5) :: RemoteFunction
@@ -1404,7 +1745,7 @@ local function connectRemotes()
 				if currentModal == cardexModal then
 					renderCardexContent()
 				elseif currentModal == shopModal then
-					renderShopContent()
+					renderRobuxShopContent()
 				elseif currentModal == garageModal then
 					renderGarageContent()
 				end

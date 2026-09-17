@@ -42,6 +42,8 @@ type WheelVisual = {
 	driven: boolean,
 	height: number, -- how far above its modelled position the wheel is drawn
 	angle: number, -- roll
+	smokeAttachment: Attachment,
+	smokeEmitter: ParticleEmitter,
 }
 
 type CarVisual = {
@@ -81,17 +83,57 @@ local function collect(car: Model): CarVisual?
 
 		local travel = mount:GetAttribute("Travel") or 0
 		local _, _, freeLength = CarPhysics.springOf(stats, travel)
+		local radius = mount:GetAttribute("Radius") or 1.5
+
+		local smokeAtt = Instance.new("Attachment")
+		smokeAtt.Name = "SmokeAttachment"
+		smokeAtt.Position = Vector3.new(0, -radius, 0)
+		smokeAtt.Parent = mount
+
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Name = "DriftSmoke"
+		emitter.Texture = "rbxassetid://654393285"
+		emitter.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(235, 235, 240)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 200, 210)),
+		})
+		emitter.Size = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.8),
+			NumberSequenceKeypoint.new(0.3, 2.2),
+			NumberSequenceKeypoint.new(0.7, 3.6),
+			NumberSequenceKeypoint.new(1, 4.8),
+		})
+		emitter.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.7),
+			NumberSequenceKeypoint.new(0.15, 0.25),
+			NumberSequenceKeypoint.new(0.65, 0.55),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+		emitter.Lifetime = NumberRange.new(0.6, 1.2)
+		emitter.Rate = 0
+		emitter.Speed = NumberRange.new(2, 6)
+		emitter.SpreadAngle = Vector2.new(25, 25)
+		emitter.Drag = 3.5
+		emitter.Acceleration = Vector3.new(0, 2.5, 0)
+		emitter.RotSpeed = NumberRange.new(-60, 60)
+		emitter.Rotation = NumberRange.new(0, 360)
+		emitter.EmissionDirection = Enum.NormalId.Top
+		emitter.Enabled = true
+		emitter.Parent = smokeAtt
+
 		table.insert(wheels, {
 			mount = mount,
 			suspension = suspension,
 			spin = spin,
-			radius = mount:GetAttribute("Radius"),
+			radius = radius,
 			travel = travel,
 			freeLength = freeLength,
 			steers = mount:GetAttribute("Steers") == true,
 			driven = mount:GetAttribute("Driven") == true,
 			height = 0,
 			angle = 0,
+			smokeAttachment = smokeAtt,
+			smokeEmitter = emitter,
 		})
 	end
 	if #wheels == 0 then
@@ -138,8 +180,9 @@ local function animate(visual: CarVisual, dt: number)
 	local chassis = visual.chassis
 	local stats = visual.stats
 	local cf = chassis.CFrame
-	local up = cf.UpVector
-	local forwardSpeed = chassis.AssemblyLinearVelocity:Dot(cf.LookVector)
+	local vel = chassis.AssemblyLinearVelocity
+	local forwardSpeed = vel:Dot(cf.LookVector)
+	local lateralSpeed = math.abs(vel:Dot(cf.RightVector))
 
 	local steer, braking, handbrake
 	local driven = localState
@@ -158,6 +201,12 @@ local function animate(visual: CarVisual, dt: number)
 	local lock = math.rad(stats.SteerAngle) * (1 - stats.SteerSpeedFalloff * speedRatio)
 	local follow = math.min(1, dt * WHEEL_SMOOTHING)
 
+	local isDrifting = (lateralSpeed > 8.5) or (handbrake and math.abs(forwardSpeed) > 10)
+	local driftIntensity = math.clamp((lateralSpeed - 7) / 18, 0, 1)
+	if handbrake and math.abs(forwardSpeed) > 10 then
+		driftIntensity = math.max(driftIntensity, 0.8)
+	end
+
 	for _, wheel in visual.wheels do
 		local reach = wheel.freeLength + wheel.radius * (1 + PHYS.SuspensionDroop)
 		local hit = Workspace:Raycast(wheel.mount.WorldPosition, up * -reach, visual.rayParams)
@@ -173,6 +222,19 @@ local function animate(visual: CarVisual, dt: number)
 		local yaw = if wheel.steers then -steer * lock else 0
 		wheel.suspension.Transform = CFrame.new(0, wheel.height, 0) * CFrame.Angles(0, yaw, 0)
 		wheel.spin.Transform = CFrame.Angles(wheel.angle, 0, 0)
+
+		-- Dynamic drift smoke / tire clouds
+		local isOnGround = hit ~= nil and drop <= 0.3
+		if wheel.smokeAttachment then
+			wheel.smokeAttachment.Position = Vector3.new(0, wheel.height - wheel.radius, 0)
+		end
+		if wheel.smokeEmitter then
+			if isOnGround and isDrifting and (not wheel.steers or lateralSpeed > 14) then
+				wheel.smokeEmitter.Rate = math.round(42 * driftIntensity)
+			else
+				wheel.smokeEmitter.Rate = 0
+			end
+		end
 	end
 
 	setBrakeLights(visual, braking)
