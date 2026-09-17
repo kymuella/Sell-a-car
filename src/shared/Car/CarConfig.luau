@@ -39,7 +39,7 @@ CarConfig.DefaultStats = {
 	-- weighs: every force is scaled by the car's mass.
 	Acceleration = 70, -- full throttle, easing off over the last quarter to TopSpeed
 	BrakeDecel = 140,
-	HandbrakeDecel = 40, -- gentle, so a handbrake turn keeps its speed
+	HandbrakeDecel = 30, -- gentle, so a handbrake turn keeps its speed
 	CoastDecel = 10, -- lifting off
 
 	SteerAngle = 32, -- degrees of front-wheel lock at a standstill
@@ -48,8 +48,11 @@ CarConfig.DefaultStats = {
 	-- How much sideways slide is taken out each second. High is planted, low is
 	-- drifty.
 	Grip = 10,
-	DriftGrip = 1.8, -- while the handbrake is held
-	DriftSteerBoost = 1.35, -- extra rotation while drifting
+	DriftGrip = 2.5, -- while the handbrake is held
+	DriftSteerBoost = 1.15, -- extra rotation while drifting
+	-- The share of the slide grip takes out that goes back into forward speed, so
+	-- corners and drifts carry their momentum instead of scrubbing it off.
+	SlideSpeedKept = 0.75,
 
 	DriveType = "AWD", -- AWD, RWD or FWD: which wheels have to be on the ground to accelerate
 

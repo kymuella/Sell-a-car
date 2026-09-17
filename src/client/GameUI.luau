@@ -736,8 +736,7 @@ function renderGarageContent()
 			Size = UDim2.new(1, 0, 1, 0),
 			BackgroundTransparency = 1,
 			FontFace = Font.fromEnum(Enum.Font.GothamBold),
-			Text = "No vehicles in your garage yet!
-Visit the Shop to acquire vehicles.",
+			Text = "No vehicles in your garage yet!\nVisit the Shop to acquire vehicles.",
 			TextColor3 = THEME.TextSecondary,
 			TextSize = 14,
 			Parent = garageListContainer,

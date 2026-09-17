@@ -290,9 +290,16 @@ function CarPhysics.apply(state: State, input: Input, deltaTime: number)
 	end
 	state.braking = opposing or input.handbrake
 
-	-- Across the car: take out a share of the slide each second.
+	-- Across the car: take out a share of the slide each second, and turn most
+	-- of it back into forward speed -- the arcade part of a drift. Not while
+	-- braking, and not below walking pace, where there is no "forward" to keep.
 	local grip = if input.handbrake then stats.DriftGrip else stats.Grip
-	local sideAccel = -sideSpeed * (1 - math.exp(-grip * dt)) / dt
+	local slideTaken = sideSpeed * (1 - math.exp(-grip * dt))
+	local sideAccel = -slideTaken / dt
+	local limit = if forwardSpeed >= 0 then stats.TopSpeed else stats.ReverseSpeed
+	if not (input.hold or opposing) and math.abs(forwardSpeed) > threshold and math.abs(forwardSpeed) < limit then
+		accel += math.sign(forwardSpeed) * math.abs(slideTaken) * stats.SlideSpeedKept / dt
+	end
 
 	state.traction.Force = (forward * accel + right * sideAccel) * mass * onGround
 
