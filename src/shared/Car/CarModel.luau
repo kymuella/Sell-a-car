@@ -19,6 +19,11 @@
 	    attribute of "Head" or "Tail" is a light, lit while someone drives.
 	  * Attributes on the Model override CarConfig.DefaultStats for this car.
 
+	Any car can also be built in a worse condition from CarConfig.Conditions --
+	Rusted, for barn finds -- which is worked out from the same template: paint
+	and bare metal corrode, glass goes grimy, lamps die, the car sags on its
+	wheels and its stats drop. No car needs a second model for it.
+
 	What gets built is kept simple for the physics. The whole car is one
 	invisible box -- the Chassis, sized to the bodywork -- carrying a spring force
 	per wheel, a traction force and a steering torque, which CarPhysics sets. The
@@ -208,11 +213,38 @@ local function addEnterPrompt(seat: BasePart, actionText: string, carName: strin
 	prompt.Parent = seat
 end
 
+type Condition = typeof(CarConfig.Conditions.Rusted)
+
+--[[
+	Ages one visible part for a condition like Rusted: glass goes grimy, paint and
+	bare metal corrode, and everything else fades under dirt. Works on any car,
+	because it goes by what a part is made of rather than what it is called.
+]]
+local function weather(part: BasePart, condition: Condition, rng: Random)
+	if part.Transparency >= 0.99 then
+		return -- invisible helpers stay invisible
+	end
+	part.Reflectance = 0
+
+	if part.Material == Enum.Material.Glass or part.Transparency > 0.05 then
+		part.Material = Enum.Material.SmoothPlastic
+		part.Color = condition.GrimeColor
+		part.Transparency = condition.GlassTransparency
+	elseif part:GetAttribute("Paint") == true or part.Material == Enum.Material.Metal then
+		part.Material = Enum.Material.CorrodedMetal
+		part.Color = condition.RustColors[rng:NextInteger(1, #condition.RustColors)]
+	else
+		local hue, saturation, value = part.Color:ToHSV()
+		part.Color = Color3.fromHSV(hue, saturation * 0.4, value * 0.7):Lerp(condition.GrimeColor, 0.35)
+	end
+end
+
 type SeatContext = {
 	base: CFrame,
 	car: Model,
 	chassis: BasePart,
 	displayName: string,
+	enterAction: string, -- the driver's-seat prompt
 	hitboxCentre: Vector3,
 	halfWidth: number,
 	groundY: number,
@@ -257,15 +289,16 @@ local function buildSeat(ctx: SeatContext, name: string, cf: CFrame, look: BaseP
 
 	seat.Parent = ctx.car
 	weld(ctx.chassis, seat)
-	addEnterPrompt(seat, if isDriver then "Drive" else "Ride", ctx.displayName)
+	addEnterPrompt(seat, if isDriver then ctx.enterAction else "Ride", ctx.displayName)
 end
 
 --[[
-	Builds the car `carName` with its car-space origin on `base`. The model comes
-	back unparented, with PrimaryPart set to the chassis, so car:PivotTo() moves
-	it.
+	Builds the car `carName` with its car-space origin on `base`, in `condition`
+	-- "Restored" (the default: as the template made it) or one of
+	CarConfig.Conditions, such as "Rusted". The model comes back unparented, with
+	PrimaryPart set to the chassis, so car:PivotTo() moves it.
 ]]
-function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Model
+function CarModel.build(carName: string, base: CFrame, customPaint: Color3?, condition: string?): Model
 	local template = findTemplate(carName)
 	local stats = CarModel.statsOf(template)
 
@@ -277,6 +310,18 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 		stats.Grip = catalog.Grip
 		stats.DriveType = catalog.DriveType
 	end
+
+	local aged: Condition? = if condition then CarConfig.Conditions[condition] else nil
+	if condition and condition ~= "Restored" and not aged then
+		warn(("CarModel: no condition called %q; building %s restored"):format(condition, carName))
+	end
+	if aged then
+		for key, multiplier in aged.Stats do
+			stats[key] *= multiplier
+		end
+		stats.DisplayName = aged.NamePrefix .. stats.DisplayName
+	end
+	local rng = Random.new()
 
 	local skin = template:Clone()
 	-- Joints the template came with would tie wheels to bodywork.
@@ -351,6 +396,10 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 	local radius = radiusSum / #wheelKeys
 	local axleY = axleSum / #wheelKeys
 
+	-- An aged car sits lower: the wheels ride further up into the arches.
+	local raise = Vector3.new(0, if aged then radius * aged.RideDrop else 0, 0)
+	groundY += raise.Y
+
 	-- The hitbox: the bodywork's bounds, trimmed, floored above the ground.
 	local floorY = axleY - radius * PHYS.HitboxFloor
 	local topY = math.max(bodyMax.Y, floorY + radius)
@@ -408,7 +457,10 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 		weld(chassis, part)
 
 		local lamp = part:GetAttribute("Lamp")
-		if lamp == "Head" or lamp == "Tail" then
+		if aged then
+			weather(part, aged, rng)
+			part:SetAttribute("Lamp", nil) -- long dead: nothing for CarService to switch on
+		elseif lamp == "Head" or lamp == "Tail" then
 			addLamp(part, lamp, base.LookVector)
 		end
 	end
@@ -422,7 +474,7 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 			or (stats.DriveType == "RWD" and not steers)
 			or (stats.DriveType == "FWD" and steers)
 		local travel = wheelRadius * stats.SuspensionTravel
-		local inChassis = wheel.centre - hitboxCentre
+		local inChassis = wheel.centre + raise - hitboxCentre
 
 		-- The spring pushes up through the top of the wheel's travel.
 		local mount = Instance.new("Attachment")
@@ -444,7 +496,7 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 
 		-- Hub: rides the suspension and steers. Spinner: rolls, on the hub.
 		local folder = newFolder("Wheel" .. key, wheelsFolder)
-		local at = base * CFrame.new(wheel.centre)
+		local at = base * CFrame.new(wheel.centre + raise)
 
 		local hub = jointPart("Hub", at, folder)
 		local suspension = Instance.new("Motor6D")
@@ -462,8 +514,11 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 		spin.Parent = spinner
 
 		for _, piece in wheel.pieces do
-			carry(piece.part, base * placed[piece.part], folder)
+			carry(piece.part, base * CFrame.new(raise) * placed[piece.part], folder)
 			weld(if piece.spins then spinner else hub, piece.part)
+			if aged then
+				weather(piece.part, aged, rng)
+			end
 		end
 	end
 
@@ -472,6 +527,7 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 		car = car,
 		chassis = chassis,
 		displayName = stats.DisplayName,
+		enterAction = if aged then aged.EnterAction else "Drive",
 		hitboxCentre = hitboxCentre,
 		halfWidth = hitboxSize.X / 2,
 		groundY = groundY,
@@ -487,10 +543,18 @@ function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Mo
 		local guess = CFrame.new(hitboxCentre.X - hitboxSize.X * 0.2, axleY + radius * 0.5, hitboxCentre.Z)
 		buildSeat(seatContext, "DriverSeat", guess, nil, true)
 	end
+	if aged then
+		for _, child in car:GetChildren() do
+			if child:IsA("Seat") or child:IsA("VehicleSeat") then
+				weather(child, aged, rng)
+			end
+		end
+	end
 
 	for key, value in stats do
 		car:SetAttribute(key, value)
 	end
+	car:SetAttribute("Condition", if aged then condition else "Restored")
 	car:SetAttribute("CarId", carName)
 	if paint and typeof(paint) == "Color3" then
 		car:SetAttribute("PaintColor", paint)

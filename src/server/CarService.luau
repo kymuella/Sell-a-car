@@ -12,7 +12,8 @@
 	other client's CarVisuals reads to turn that car's wheels and light its brake
 	lamps.
 
-	Everything that has to be authoritative stays here too: seating, the lights,
+	Everything that has to be authoritative stays here too: seating (and hiding
+	whoever sits down, so nothing of them pokes through the bodywork), the lights,
 	and putting a flipped or lost car back where it spawned.
 ]]
 
@@ -25,6 +26,7 @@ local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
 local CarConfig = require(CarFolder.CarConfig)
 local CarModel = require(CarFolder.CarModel)
 local CarPhysics = require(CarFolder.CarPhysics)
+local CharacterVisibility = require(script.Parent.CharacterVisibility)
 
 local RESET = CarConfig.Reset
 local DRIVE = CarConfig.Driving
@@ -49,6 +51,8 @@ type Placement = {
 	origin: CFrame, -- car-space origin
 	snap: boolean, -- drop onto the floor underneath first
 	customPaint: Color3?,
+	condition: string?, -- nil for restored; see CarConfig.Conditions
+	barnFind: boolean?, -- a stand-in for BarnService's car, not one to spawn here
 }
 
 local entries: { Entry } = {}
@@ -155,6 +159,7 @@ end
 local function bindSeat(entry: Entry, seat: any)
 	local prompt = seat:FindFirstChildOfClass("ProximityPrompt")
 	local isDriverSeat = seat:GetAttribute("IsDriverSeat") == true
+	local occupant: Humanoid? = nil
 
 	if prompt then
 		prompt.Triggered:Connect(function(player: Player)
@@ -167,17 +172,23 @@ local function bindSeat(entry: Entry, seat: any)
 		end)
 	end
 
-	if isDriverSeat then
-		seat:GetPropertyChangedSignal("Occupant"):Connect(function()
+	seat:GetPropertyChangedSignal("Occupant"):Connect(function()
+		-- Riders vanish while seated, so no arm or hat pokes through the car.
+		local previous = occupant
+		occupant = seat.Occupant
+		if previous and previous ~= occupant then
+			CharacterVisibility.show(previous.Parent)
+		end
+		if occupant then
+			CharacterVisibility.hide(occupant.Parent)
+		end
+
+		if isDriverSeat then
 			onOccupantChanged(entry)
-		end)
-	else
-		seat:GetPropertyChangedSignal("Occupant"):Connect(function()
-			if prompt then
-				prompt.Enabled = seat.Occupant == nil
-			end
-		end)
-	end
+		elseif prompt then
+			prompt.Enabled = occupant == nil
+		end
+	end)
 end
 
 local function carContainer(): Folder
@@ -211,7 +222,7 @@ local function restOnGround(origin: CFrame, groundOffset: number): CFrame
 end
 
 local function build(placement: Placement): Model
-	local car = CarModel.build(placement.car, placement.origin, placement.customPaint)
+	local car = CarModel.build(placement.car, placement.origin, placement.customPaint, placement.condition)
 	if placement.snap then
 		local rested = restOnGround(placement.origin, car:GetAttribute("GroundOffset") or 0)
 		car:PivotTo(CFrame.new(rested.Position - placement.origin.Position) * car:GetPivot())
@@ -228,11 +239,14 @@ local function takeStandIns(): { Placement }
 			continue
 		end
 		local carName = standIn:GetAttribute("CarTemplate")
+		local condition = standIn:GetAttribute("Condition")
 		local ok, origin = pcall(CarModel.originOf, standIn)
 		table.insert(placements, {
 			car = if typeof(carName) == "string" then carName else CarConfig.DefaultCar,
 			origin = if ok then origin else standIn:GetPivot(),
 			snap = not ok,
+			condition = if typeof(condition) == "string" and condition ~= "Restored" then condition else nil,
+			barnFind = standIn:GetAttribute("BarnFind") == true,
 		})
 		standIn:Destroy()
 	end
@@ -249,14 +263,22 @@ end
 
 --[[
 	Builds the car `carName` at `origin` (its car-space origin), dropped onto the
-	floor unless `snapToGround` is false, and wires up its seats.
+	floor unless `snapToGround` is false, in `condition` (nil for restored), and
+	wires up its seats.
 ]]
-function CarService.spawnCar(carName: string, origin: CFrame, snapToGround: boolean?, customPaint: Color3?): Model?
+function CarService.spawnCar(
+	carName: string,
+	origin: CFrame,
+	snapToGround: boolean?,
+	customPaint: Color3?,
+	condition: string?
+): Model?
 	local ok, result = pcall(build, {
 		car = carName,
 		origin = origin,
 		snap = snapToGround ~= false,
 		customPaint = customPaint,
+		condition = condition,
 	})
 	if not ok then
 		warn(("CarService: could not build %s: %s"):format(carName, tostring(result)))
@@ -348,7 +370,10 @@ function CarService.start()
 		placements = defaultSpawns()
 	end
 	for _, placement in placements do
-		CarService.spawnCar(placement.car, placement.origin, placement.snap)
+		-- Barn finds are BarnService's to spawn; their stand-ins only show where.
+		if not placement.barnFind then
+			CarService.spawnCar(placement.car, placement.origin, placement.snap, nil, placement.condition)
+		end
 	end
 
 	Players.PlayerRemoving:Connect(function(player)
@@ -377,8 +402,52 @@ local function placeStandIn(placement: Placement): Model
 	forEachPart(car, function(part)
 		part.Anchored = true
 	end)
+	if placement.barnFind then
+		car:SetAttribute("BarnFind", true)
+	end
 	car.Parent = carContainer()
 	return car
+end
+
+--[[
+	Takes a car out of the game. Anyone still in it is unseated -- their client
+	stands them beside it -- and shown again, then the car is destroyed.
+]]
+function CarService.removeCar(car: Model)
+	for i = #entries, 1, -1 do
+		if entries[i].car == car then
+			table.remove(entries, i)
+		end
+	end
+
+	for _, seat in car:GetDescendants() do
+		if (seat:IsA("Seat") or seat:IsA("VehicleSeat")) and seat.Occupant then
+			CharacterVisibility.show(seat.Occupant.Parent)
+			local weld = seat:FindFirstChild("SeatWeld")
+			if weld then
+				weld:Destroy()
+			end
+		end
+	end
+
+	-- A moment for the riders' clients to see their seat weld go and step out.
+	task.delay(0.1, function()
+		if car.Parent then
+			car:Destroy()
+		end
+	end)
+end
+
+--[[
+	The player driving `car`, if anyone is.
+]]
+function CarService.driverOf(car: Model): Player?
+	for _, entry in entries do
+		if entry.car == car then
+			return entry.driver
+		end
+	end
+	return nil
 end
 
 --[[
@@ -405,18 +474,31 @@ end
 --[[
 	For Studio's command bar: adds a stand-in for the car `carName` (a template in
 	ServerStorage.CarModels) on the ground where the camera is looking, facing
-	away from the camera.
+	away from the camera, in `condition` (nil for restored).
 
 		require(game.ServerScriptService.Server.CarService).addToStudio("Porsche")
+		require(game.ServerScriptService.Server.CarService).addToStudio("Porsche", "Rusted")
 ]]
-function CarService.addToStudio(carName: string): Model
+function CarService.addToStudio(carName: string, condition: string?): Model
 	local camera = Workspace.CurrentCamera
 	local focus = if camera then camera.Focus.Position else Vector3.zero
 	local look = if camera then camera.CFrame.LookVector * Vector3.new(1, 0, 1) else Vector3.zero
 	if look.Magnitude < 0.01 then
 		look = Vector3.new(0, 0, -1)
 	end
-	return placeStandIn({ car = carName, origin = CFrame.lookAt(focus, focus + look.Unit), snap = true })
+	return placeStandIn({
+		car = carName,
+		origin = CFrame.lookAt(focus, focus + look.Unit),
+		snap = true,
+		condition = condition,
+	})
+end
+
+--[[
+	For BarnService.placeInStudio: a stand-in for a barn's car at `origin`.
+]]
+function CarService.placeBarnStandIn(carName: string, origin: CFrame): Model
+	return placeStandIn({ car = carName, origin = origin, snap = true, condition = "Rusted", barnFind = true })
 end
 
 local playerCars: { [Player]: Model } = {}
@@ -425,15 +507,7 @@ function CarService.despawnForPlayer(player: Player): boolean
 	local car = playerCars[player]
 	if car then
 		playerCars[player] = nil
-		for i = #entries, 1, -1 do
-			if entries[i].car == car then
-				table.remove(entries, i)
-				break
-			end
-		end
-		if car.Parent then
-			car:Destroy()
-		end
+		CarService.removeCar(car)
 		return true
 	end
 	return false

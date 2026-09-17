@@ -31,16 +31,16 @@ CarConfig.DefaultStats = {
 	DisplayName = "", -- shown on the enter prompt; empty uses the template's name
 	Scale = 1, -- built this many times the template's size
 
-	-- Studs per second. 120 reads as about 150 km/h on the speedometer.
-	TopSpeed = 120,
-	ReverseSpeed = 31,
+	-- Studs per second. 60 studs/s calibrated to 120 MPH on the speedometer.
+	TopSpeed = 60,
+	ReverseSpeed = 15,
 
 	-- Studs per second per second. These are what the car does whatever it
 	-- weighs: every force is scaled by the car's mass.
-	Acceleration = 70, -- full throttle, easing off over the last quarter to TopSpeed
-	BrakeDecel = 140,
-	HandbrakeDecel = 30, -- gentle, so a handbrake turn keeps its speed
-	CoastDecel = 10, -- lifting off
+	Acceleration = 36, -- full throttle, easing off over the last quarter to TopSpeed
+	BrakeDecel = 70,
+	HandbrakeDecel = 16, -- gentle, so a handbrake turn keeps its speed
+	CoastDecel = 5, -- lifting off
 
 	SteerAngle = 32, -- degrees of front-wheel lock at a standstill
 	SteerSpeedFalloff = 0.65, -- fraction of that lock given up at TopSpeed
@@ -118,5 +118,75 @@ CarConfig.Reset = {
 
 -- Target CFrame for the main driving / playing area
 CarConfig.PlayingArea = CFrame.new(0, 3, 130)
+
+--[[
+	The conditions a car can be built in, besides "Restored" -- the car as its
+	template made it. Each is derived from the template when the car is built,
+	so any of the game's cars can turn up in any condition without a second model.
+]]
+CarConfig.Conditions = {
+	Rusted = {
+		NamePrefix = "Rusted ",
+		EnterAction = "Steal", -- the driver's-seat prompt
+
+		-- Multipliers on the car's stats: it runs, but barely.
+		Stats = {
+			TopSpeed = 0.55,
+			ReverseSpeed = 0.7,
+			Acceleration = 0.45,
+			Grip = 0.8,
+			SteerAngle = 0.85,
+		},
+
+		-- Sits this many wheel radii lower, on tired springs and soft tyres.
+		RideDrop = 0.22,
+
+		-- Paintwork and bare metal corrode to one of these; everything else fades
+		-- and takes on grime.
+		RustColors = {
+			Color3.fromRGB(96, 44, 22),
+			Color3.fromRGB(78, 36, 20),
+			Color3.fromRGB(112, 56, 28),
+		},
+		GrimeColor = Color3.fromRGB(62, 54, 42),
+		GlassTransparency = 0.45, -- windows too dirty to see through clearly
+	},
+}
+
+--[[
+	Barn finds: rusted cars waiting in barns (parts tagged BarnSpot) for someone
+	to steal them and drive them into a garage drop-off (parts tagged
+	GarageDropOff). See BarnService.
+]]
+CarConfig.Barns = {
+	RespawnSeconds = 90, -- after a barn's car is delivered, until the next one turns up
+	AbandonSeconds = 120, -- an empty barn find away from its barn this long is towed back
+	AbandonDistance = 40, -- studs from its barn before an empty car counts as away
+
+	-- How often each catalog tier turns up. A BarnSpot with a Car attribute always
+	-- has that car instead.
+	TierWeights = {
+		Starter = 30,
+		Classic = 25,
+		Sport = 25,
+		Super = 15,
+		Hyper = 5,
+	},
+}
+
+--[[
+	What happens to a barn find once it is delivered: first retrieval (unloading
+	and stripping it down), then recuperation (the rebuild), and then the car is
+	yours. Seconds per phase, by catalog tier.
+]]
+CarConfig.Restoration = {
+	Retrieval = { Starter = 20, Classic = 30, Sport = 30, Super = 45, Hyper = 60 },
+	Recuperation = { Starter = 60, Classic = 150, Sport = 120, Super = 240, Hyper = 360 },
+
+	-- Delivering a car you already own, or already have in the garage, sells it
+	-- for scrap instead: this share of its price, but never less than MinScrap.
+	ScrapShare = 0.1,
+	MinScrap = 1000,
+}
 
 return CarConfig

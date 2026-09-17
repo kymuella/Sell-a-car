@@ -6,14 +6,17 @@
 	- Garage with Dual Tabs: "MY CARS" (spawn/customize) & "DEALERSHIP" (buy cars with in-game Cash)
 	- Cardex Compendium: Discovered cars vs blacked-out mystery silhouettes with direct Dealership links
 	- Play Teleport: Cinematic fade transition to the driving area
+	- Restoration Bay: delivered barn finds counting down through retrieval and recuperation
 	- Responsive design with smooth tweens and toast notifications
 ]]
 
 local MarketplaceService = game:GetService("MarketplaceService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
 local CarCatalog = require(CarFolder.CarCatalog)
@@ -77,6 +80,7 @@ local localData = {
 	Has2xCash = false,
 	IsVIP = false,
 	HasNitro = false,
+	Restorations = {},
 }
 
 local selectedGarageCarId = "Porsche"
@@ -94,6 +98,7 @@ local spawnRemote: RemoteFunction? = nil
 local despawnRemote: RemoteFunction? = nil
 local teleportRemote: RemoteFunction? = nil
 local getDataRemote: RemoteFunction? = nil
+local notifyRemote: RemoteEvent? = nil
 
 -- GUI References
 local screenGui: ScreenGui
@@ -450,8 +455,8 @@ function renderCardexContent()
 				addCorner(fill, 3)
 			end
 
-			addStatRow(0, "Top Speed", string.format("%d studs/s", car.TopSpeed), car.TopSpeed / 200)
-			addStatRow(28, "Acceleration", tostring(car.Acceleration), car.Acceleration / 140)
+			addStatRow(0, "Top Speed", string.format("%d MPH", math.round(car.TopSpeed * 2)), (car.TopSpeed * 2) / 200)
+			addStatRow(28, "Acceleration", tostring(car.Acceleration), car.Acceleration / 70)
 			addStatRow(56, "Cornering Grip", tostring(car.Grip), car.Grip / 15)
 
 			make("TextLabel", {
@@ -769,6 +774,112 @@ function renderRobuxShopContent()
 	end
 end
 
+-- Restoration Bay: barn finds being restored, drawn at the top of the garage list
+local restorationBars: { { job: any, fill: Frame, status: TextLabel } } = {}
+
+-- Which phase a restoration job is in, how far through it (0-1), and seconds left in it.
+local function restorationProgress(job): (string, number, number)
+	local elapsed = Workspace:GetServerTimeNow() - job.StartedAt
+	if elapsed < job.RetrievalSeconds then
+		return "RETRIEVAL", elapsed / job.RetrievalSeconds, job.RetrievalSeconds - elapsed
+	end
+	local rebuild = elapsed - job.RetrievalSeconds
+	return "RECUPERATION",
+		math.clamp(rebuild / job.RecuperationSeconds, 0, 1),
+		math.max(job.RecuperationSeconds - rebuild, 0)
+end
+
+local function updateRestorationBars()
+	for _, bar in restorationBars do
+		if bar.fill.Parent then
+			local phase, progress, left = restorationProgress(bar.job)
+			local seconds = math.ceil(left)
+			bar.fill.Size = UDim2.fromScale(progress, 1)
+			bar.fill.BackgroundColor3 = if phase == "RETRIEVAL" then THEME.Gold else THEME.Accent
+			bar.status.Text = string.format("%s • %d:%02d left", phase, seconds // 60, seconds % 60)
+		end
+	end
+end
+
+local function renderRestorationBay(container: Instance): number
+	table.clear(restorationBars)
+	local jobs = localData.Restorations or {}
+	if #jobs == 0 then
+		return 0
+	end
+
+	make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 20),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "🔧 RESTORATION BAY",
+		TextColor3 = THEME.Gold,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		LayoutOrder = -1000,
+		Parent = container,
+	})
+
+	for i, job in jobs do
+		local car = CarCatalog.get(job.CarId)
+		local card = make("Frame", {
+			Size = UDim2.new(1, 0, 0, 64),
+			BackgroundColor3 = THEME.BgCard,
+			BorderSizePixel = 0,
+			LayoutOrder = -1000 + i,
+			Parent = container,
+		})
+		addCorner(card, 8)
+		addStroke(card, THEME.Gold, 0.6)
+
+		make("TextLabel", {
+			Position = UDim2.new(0, 12, 0, 8),
+			Size = UDim2.new(1, -24, 0, 18),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = if car then car.DisplayName else job.CarId,
+			TextColor3 = THEME.TextPrimary,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Parent = card,
+		})
+
+		local status = make("TextLabel", {
+			Position = UDim2.new(0, 12, 0, 26),
+			Size = UDim2.new(1, -24, 0, 14),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+			Text = "",
+			TextColor3 = THEME.TextSecondary,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = card,
+		})
+
+		local track = make("Frame", {
+			Position = UDim2.new(0, 12, 0, 46),
+			Size = UDim2.new(1, -24, 0, 8),
+			BackgroundColor3 = Color3.fromRGB(42, 46, 58),
+			BorderSizePixel = 0,
+			Parent = card,
+		})
+		addCorner(track, 4)
+		local fill = make("Frame", {
+			Size = UDim2.fromScale(0, 1),
+			BackgroundColor3 = THEME.Gold,
+			BorderSizePixel = 0,
+			Parent = track,
+		})
+		addCorner(fill, 4)
+
+		table.insert(restorationBars, { job = job, fill = fill, status = status })
+	end
+
+	updateRestorationBars()
+	return #jobs
+end
+
 -- Garage & In-Game Dealership Content Renderer
 function renderGarageContent()
 	if not garageBodyFrame then
@@ -806,29 +917,41 @@ function renderGarageContent()
 		addCorner(detailContainer, 10)
 		addStroke(detailContainer, THEME.Stroke, THEME.StrokeTrans)
 
+		make("UIListLayout", {
+			Padding = UDim.new(0, 10),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = listContainer,
+		})
+		local restoringCount = renderRestorationBay(listContainer)
+
 		if #ownedList == 0 then
 			make("TextLabel", {
-				Size = UDim2.new(1, 0, 1, 0),
+				Size = UDim2.new(1, 0, 0, 60),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamBold),
-				Text = "No vehicles in your garage!
-Visit the Dealership tab to buy cars.",
+				Text = "No vehicles in your garage!\nVisit the Dealership tab to buy cars.",
 				TextColor3 = THEME.TextSecondary,
 				TextSize = 13,
+				LayoutOrder = 1,
 				Parent = listContainer,
 			})
+			if restoringCount > 0 then
+				make("TextLabel", {
+					Size = UDim2.new(1, 0, 1, 0),
+					BackgroundTransparency = 1,
+					FontFace = Font.fromEnum(Enum.Font.GothamBold),
+					Text = "Your barn finds are being restored.\nThey'll be ready to drive when their bars fill.",
+					TextColor3 = THEME.TextSecondary,
+					TextSize = 13,
+					Parent = detailContainer,
+				})
+			end
 			return
 		end
 
 		if not localData.OwnedCars[selectedGarageCarId] then
 			selectedGarageCarId = ownedList[1].Id
 		end
-
-		make("UIListLayout", {
-			Padding = UDim.new(0, 10),
-			SortOrder = Enum.SortOrder.LayoutOrder,
-			Parent = listContainer,
-		})
 
 		for i, car in ownedList do
 			local isSelected = car.Id == selectedGarageCarId
@@ -871,7 +994,7 @@ Visit the Dealership tab to buy cars.",
 				Size = UDim2.new(1, -30, 0, 16),
 				BackgroundTransparency = 1,
 				FontFace = Font.fromEnum(Enum.Font.GothamMedium),
-				Text = string.format("%s Class • %d studs/s", car.Tier, car.TopSpeed),
+				Text = string.format("%s Class • %d MPH", car.Tier, math.round(car.TopSpeed * 2)),
 				TextColor3 = THEME.TextMuted,
 				TextSize = 11,
 				TextXAlignment = Enum.TextXAlignment.Left,
@@ -951,7 +1074,7 @@ Visit the Dealership tab to buy cars.",
 			})
 		end
 
-		addBoxSpec(1, 1, "Top Speed", string.format("%d studs/s", currentCar.TopSpeed))
+		addBoxSpec(1, 1, "Top Speed", string.format("%d MPH", math.round(currentCar.TopSpeed * 2)))
 		addBoxSpec(2, 1, "Acceleration", tostring(currentCar.Acceleration))
 		addBoxSpec(1, 2, "Cornering Grip", tostring(currentCar.Grip))
 		addBoxSpec(2, 2, "Drivetrain", currentCar.DriveType)
@@ -1174,7 +1297,7 @@ Visit the Dealership tab to buy cars.",
 				})
 			end
 
-			specLine(6, "Top Speed", string.format("%d studs/s", car.TopSpeed))
+			specLine(6, "Top Speed", string.format("%d MPH", math.round(car.TopSpeed * 2)))
 			specLine(30, "Acceleration", tostring(car.Acceleration))
 			specLine(54, "Cornering Grip", tostring(car.Grip))
 			specLine(78, "Drive Type", car.DriveType)
@@ -1736,6 +1859,15 @@ local function connectRemotes()
 	spawnRemote = remotesFolder:WaitForChild("SpawnCar", 5) :: RemoteFunction
 	despawnRemote = remotesFolder:WaitForChild("DespawnCar", 5) :: RemoteFunction
 	teleportRemote = remotesFolder:WaitForChild("TeleportToPlay", 5) :: RemoteFunction
+	notifyRemote = remotesFolder:WaitForChild("Notify", 5) :: RemoteEvent
+
+	if notifyRemote then
+		notifyRemote.OnClientEvent:Connect(function(message, isError)
+			if typeof(message) == "string" then
+				showToast(message, isError == true)
+			end
+		end)
+	end
 
 	if syncRemote then
 		syncRemote.OnClientEvent:Connect(function(data)
@@ -1766,6 +1898,19 @@ end
 
 function GameUI.start()
 	buildInterface()
+
+	-- Keep the restoration bars counting down while the garage is open.
+	local sinceBarUpdate = 0
+	RunService.Heartbeat:Connect(function(deltaTime)
+		sinceBarUpdate += deltaTime
+		if sinceBarUpdate >= 0.25 then
+			sinceBarUpdate = 0
+			if currentModal == garageModal then
+				updateRestorationBars()
+			end
+		end
+	end)
+
 	connectRemotes()
 	updateHUD()
 end

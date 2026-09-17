@@ -1,16 +1,33 @@
 --[[
 	PlayerDataService -- Manages economy, inventory, cardex discovery,
 	and remote request handlers for Shop, Garage, and Teleportation.
+
+	Also the garage's restoration bay: a barn find delivered by BarnService
+	becomes a restoration job, which goes through retrieval and then
+	recuperation (CarConfig.Restoration) before the car is added to OwnedCars.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
 local CarCatalog = require(CarFolder.CarCatalog)
+local CarConfig = require(CarFolder.CarConfig)
 local CarService = require(script.Parent.CarService)
 
+local RESTORATION = CarConfig.Restoration
+
 local PlayerDataService = {}
+
+-- A car in the restoration bay. Times are Workspace:GetServerTimeNow(), which
+-- clients share, so the garage screen can count down without asking.
+export type RestorationJob = {
+	CarId: string,
+	StartedAt: number,
+	RetrievalSeconds: number,
+	RecuperationSeconds: number,
+}
 
 export type PlayerData = {
 	Cash: number,
@@ -21,6 +38,7 @@ export type PlayerData = {
 	Has2xCash: boolean,
 	IsVIP: boolean,
 	HasNitro: boolean,
+	Restorations: { RestorationJob },
 }
 
 local sessionData: { [Player]: PlayerData } = {}
@@ -32,6 +50,7 @@ local spawnRemote: RemoteFunction
 local despawnRemote: RemoteFunction
 local teleportRemote: RemoteFunction
 local getDataRemote: RemoteFunction
+local notifyRemote: RemoteEvent
 
 local STARTING_CASH = 25000
 local PLAYTIME_BONUS = 500
@@ -52,6 +71,7 @@ local function createDefaultData(): PlayerData
 		Has2xCash = false,
 		IsVIP = false,
 		HasNitro = false,
+		Restorations = {},
 	}
 end
 
@@ -184,6 +204,81 @@ local function onTeleportToPlay(player: Player): (boolean, string)
 	end
 end
 
+--[[
+	Pops a toast on `player`'s screen.
+]]
+function PlayerDataService.notify(player: Player, message: string, isError: boolean?)
+	if notifyRemote then
+		notifyRemote:FireClient(player, message, isError == true)
+	end
+end
+
+--[[
+	`player` has delivered the barn find `carId` to their garage. It goes into the
+	restoration bay -- unless they already own it or already have one in there, in
+	which case it is sold for scrap.
+]]
+function PlayerDataService.receiveBarnFind(player: Player, carId: string)
+	local data = sessionData[player]
+	local car = CarCatalog.get(carId)
+	if not (data and car) then
+		return
+	end
+	data.CardexDiscovered[carId] = true
+
+	local alreadyRestoring = false
+	for _, job in data.Restorations do
+		if job.CarId == carId then
+			alreadyRestoring = true
+		end
+	end
+
+	if data.OwnedCars[carId] or alreadyRestoring then
+		local scrap = math.max(RESTORATION.MinScrap, math.floor(car.Price * RESTORATION.ScrapShare))
+		data.Cash += scrap
+		updateLeaderstats(player, data.Cash)
+		PlayerDataService.notify(
+			player,
+			string.format("You already have a %s -- sold this one for scrap: %s", car.DisplayName, "$" .. scrap)
+		)
+	else
+		table.insert(data.Restorations, {
+			CarId = carId,
+			StartedAt = Workspace:GetServerTimeNow(),
+			RetrievalSeconds = RESTORATION.Retrieval[car.Tier] or 30,
+			RecuperationSeconds = RESTORATION.Recuperation[car.Tier] or 120,
+		})
+		PlayerDataService.notify(player, string.format("%s delivered! Retrieval has started in your garage.", car.DisplayName))
+	end
+	syncToClient(player)
+end
+
+-- Moves finished restorations into the player's owned cars.
+local function finishRestorations()
+	local now = Workspace:GetServerTimeNow()
+	for player, data in sessionData do
+		local changed = false
+		for i = #data.Restorations, 1, -1 do
+			local job = data.Restorations[i]
+			if now >= job.StartedAt + job.RetrievalSeconds + job.RecuperationSeconds then
+				table.remove(data.Restorations, i)
+				data.OwnedCars[job.CarId] = true
+				data.CardexDiscovered[job.CarId] = true
+				changed = true
+
+				local car = CarCatalog.get(job.CarId)
+				PlayerDataService.notify(
+					player,
+					string.format("%s is restored and ready to drive in your garage!", if car then car.DisplayName else job.CarId)
+				)
+			end
+		end
+		if changed and player.Parent then
+			syncToClient(player)
+		end
+	end
+end
+
 local function onBuyRobuxProduct(player: Player, productId: any): (boolean, string)
 	local data = sessionData[player]
 	if not data then
@@ -270,6 +365,17 @@ function PlayerDataService.start()
 	teleportRemote.Name = "TeleportToPlay"
 	teleportRemote.OnServerInvoke = onTeleportToPlay
 	teleportRemote.Parent = remotesFolder
+
+	notifyRemote = Instance.new("RemoteEvent")
+	notifyRemote.Name = "Notify"
+	notifyRemote.Parent = remotesFolder
+
+	task.spawn(function()
+		while true do
+			task.wait(1)
+			finishRestorations()
+		end
+	end)
 
 	Players.PlayerAdded:Connect(setupPlayer)
 	Players.PlayerRemoving:Connect(onPlayerRemoving)

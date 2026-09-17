@@ -54,6 +54,7 @@ type CarVisual = {
 	tailLamps: { Light },
 	rayParams: RaycastParams,
 	braking: boolean?,
+	drifting: boolean?,
 }
 
 local tracked: { [Model]: CarVisual | false } = {}
@@ -87,36 +88,39 @@ local function collect(car: Model): CarVisual?
 
 		local smokeAtt = Instance.new("Attachment")
 		smokeAtt.Name = "SmokeAttachment"
-		smokeAtt.Position = Vector3.new(0, -radius, 0)
-		smokeAtt.Parent = mount
+		smokeAtt.Position = mount.Position + Vector3.new(0, -travel - radius, 0)
+		smokeAtt.Parent = chassis
 
 		local emitter = Instance.new("ParticleEmitter")
 		emitter.Name = "DriftSmoke"
-		emitter.Texture = "rbxassetid://654393285"
+		emitter.Texture = "rbxasset://textures/particles/smoke_main.dds"
 		emitter.Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(235, 235, 240)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 200, 210)),
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(240, 240, 245)),
+			ColorSequenceKeypoint.new(0.4, Color3.fromRGB(225, 225, 230)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(190, 190, 200)),
 		})
 		emitter.Size = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.8),
-			NumberSequenceKeypoint.new(0.3, 2.2),
-			NumberSequenceKeypoint.new(0.7, 3.6),
+			NumberSequenceKeypoint.new(0, 0.6),
+			NumberSequenceKeypoint.new(0.2, 1.8),
+			NumberSequenceKeypoint.new(0.6, 3.4),
 			NumberSequenceKeypoint.new(1, 4.8),
 		})
 		emitter.Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.7),
+			NumberSequenceKeypoint.new(0, 0.6),
 			NumberSequenceKeypoint.new(0.15, 0.25),
-			NumberSequenceKeypoint.new(0.65, 0.55),
+			NumberSequenceKeypoint.new(0.7, 0.65),
 			NumberSequenceKeypoint.new(1, 1),
 		})
 		emitter.Lifetime = NumberRange.new(0.6, 1.2)
 		emitter.Rate = 0
 		emitter.Speed = NumberRange.new(2, 6)
-		emitter.SpreadAngle = Vector2.new(25, 25)
+		emitter.SpreadAngle = Vector2.new(30, 30)
 		emitter.Drag = 3.5
-		emitter.Acceleration = Vector3.new(0, 2.5, 0)
-		emitter.RotSpeed = NumberRange.new(-60, 60)
+		emitter.Acceleration = Vector3.new(0, 2.8, 0)
+		emitter.RotSpeed = NumberRange.new(-50, 50)
 		emitter.Rotation = NumberRange.new(0, 360)
+		emitter.LightEmission = 0.15
+		emitter.LightInfluence = 0
 		emitter.EmissionDirection = Enum.NormalId.Top
 		emitter.Enabled = true
 		emitter.Parent = smokeAtt
@@ -180,6 +184,7 @@ local function animate(visual: CarVisual, dt: number)
 	local chassis = visual.chassis
 	local stats = visual.stats
 	local cf = chassis.CFrame
+	local up = cf.UpVector
 	local vel = chassis.AssemblyLinearVelocity
 	local forwardSpeed = vel:Dot(cf.LookVector)
 	local lateralSpeed = math.abs(vel:Dot(cf.RightVector))
@@ -201,11 +206,19 @@ local function animate(visual: CarVisual, dt: number)
 	local lock = math.rad(stats.SteerAngle) * (1 - stats.SteerSpeedFalloff * speedRatio)
 	local follow = math.min(1, dt * WHEEL_SMOOTHING)
 
-	local isDrifting = (lateralSpeed > 8.5) or (handbrake and math.abs(forwardSpeed) > 10)
-	local driftIntensity = math.clamp((lateralSpeed - 7) / 18, 0, 1)
-	if handbrake and math.abs(forwardSpeed) > 10 then
-		driftIntensity = math.max(driftIntensity, 0.8)
+	local isDrifting = (lateralSpeed > 4.5)
+		or (handbrake and math.abs(forwardSpeed) > 4.0)
+		or (braking and math.abs(forwardSpeed) > 10.0)
+
+	local driftIntensity = math.clamp((lateralSpeed - 3.5) / 8, 0, 1)
+	if handbrake and math.abs(forwardSpeed) > 4 then
+		driftIntensity = math.max(driftIntensity, 0.85)
+	elseif braking and math.abs(forwardSpeed) > 10 then
+		driftIntensity = math.max(driftIntensity, 0.6)
 	end
+
+	local justStartedDrifting = isDrifting and not visual.drifting
+	visual.drifting = isDrifting
 
 	for _, wheel in visual.wheels do
 		local reach = wheel.freeLength + wheel.radius * (1 + PHYS.SuspensionDroop)
@@ -224,13 +237,17 @@ local function animate(visual: CarVisual, dt: number)
 		wheel.spin.Transform = CFrame.Angles(wheel.angle, 0, 0)
 
 		-- Dynamic drift smoke / tire clouds
-		local isOnGround = hit ~= nil and drop <= 0.3
+		local isOnGround = hit ~= nil
 		if wheel.smokeAttachment then
-			wheel.smokeAttachment.Position = Vector3.new(0, wheel.height - wheel.radius, 0)
+			wheel.smokeAttachment.Position = wheel.mount.Position + Vector3.new(0, wheel.height - wheel.travel - wheel.radius, 0)
 		end
 		if wheel.smokeEmitter then
-			if isOnGround and isDrifting and (not wheel.steers or lateralSpeed > 14) then
-				wheel.smokeEmitter.Rate = math.round(42 * driftIntensity)
+			local emitsForWheel = isOnGround and isDrifting and (not wheel.steers or lateralSpeed > 7.0)
+			if emitsForWheel then
+				if justStartedDrifting and not wheel.steers then
+					wheel.smokeEmitter:Emit(4)
+				end
+				wheel.smokeEmitter.Rate = math.clamp(math.round(48 * driftIntensity), 16, 56)
 			else
 				wheel.smokeEmitter.Rate = 0
 			end

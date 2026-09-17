@@ -17,16 +17,17 @@ local RunService = game:GetService("RunService")
 
 local CarConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car"):WaitForChild("CarConfig"))
 
-local KMH_PER_STUDS_PER_SECOND = 3.6 / CarConfig.StudsPerMetre
+local MPH_PER_STUDS_PER_SECOND = 2.0
 
 -- The top of the dial for a car that tops out at `topSpeed` studs/s: its top
--- speed in km/h rounded up to the next 20, so the numerals land on round numbers.
+-- speed in MPH rounded up to the next 20 with headroom so top speed lands near redline.
 local function dialMaxFor(topSpeed: number): number
-	return math.max(math.ceil(topSpeed * KMH_PER_STUDS_PER_SECOND / 20) * 20, 20)
+	local maxMph = topSpeed * MPH_PER_STUDS_PER_SECOND
+	return math.max(math.ceil((maxMph * 1.15) / 20) * 20, 40)
 end
 
 local CONFIG = {
-	Unit = "KM/H",
+	Unit = "MPH",
 	Sweep = 260, -- degrees of arc
 	StartAngle = 140, -- 0 = 3 o'clock, increases clockwise
 	SegmentCount = 130, -- resolution of the glowing progress arc
@@ -272,10 +273,10 @@ end
 
 local hide: () -> ()
 
--- Ground speed in km/h, and whether the car is rolling backwards.
+-- Ground speed in MPH, and whether the car is rolling backwards.
 local function carSpeed(chassis: BasePart): (number, boolean)
 	local velocity = chassis.AssemblyLinearVelocity
-	local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude * KMH_PER_STUDS_PER_SECOND
+	local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude * MPH_PER_STUDS_PER_SECOND
 	local reversing = velocity:Dot(chassis.CFrame.LookVector) < -CONFIG.ReverseSpeed
 	return speed, reversing
 end
