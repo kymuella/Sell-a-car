@@ -171,13 +171,15 @@ Everything lives in `CarConfig`. The values worth reaching for first:
 uvx mcp-for-blender@2.0.0 install-addon
 ```
 
-Then, each time:
+Then, once, in Blender's **Edit > Preferences > Add-ons**: enable
+**Interface: MCP for Blender**, open its settings and untick **Allow
+Telemetry** -- the add-on ships with it on, and it records your prompts, code,
+screenshots and manual edits for upload.
 
-1. Open Blender and enable **Interface: MCP for Blender** under
-   **Edit > Preferences > Add-ons** (first time only).
-2. In the 3D viewport press `N`, open the **MCP for Blender** tab and click
-   **Connect to Claude**. It listens on `localhost:9876`.
-3. Start Claude Code here and approve the `blender` server when asked.
+After that the add-on starts listening on `localhost:9876` whenever Blender
+opens (if it has not, press `N` in the 3D viewport, open the **MCP for Blender**
+tab and click **Connect to MCP server**). Start Claude Code in this folder and
+approve the `blender` server when asked.
 
 The add-on lets Claude run any Python inside Blender, so save your `.blend`
 before asking it to change things.
