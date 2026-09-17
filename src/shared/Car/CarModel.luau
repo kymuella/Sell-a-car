@@ -1,203 +1,125 @@
 --[[
-	CarModel -- builds the car: invisible physics parts and constraints, dressed
-	in the Porsche meshes.
+	CarModel -- builds a drivable car from any template in ServerStorage.CarModels.
 
-	The meshes come from ServerStorage.CarModels.Porsche, imported from
-	blender models/porsche/export/Porsche.fbx (export_porsche.py beside it made
-	that file). The template is the car at life size in car space: its pivot is
-	the origin, at wheel-axle height midway between the axles, +Y up, -Z forward.
-	Every build clones it, scales it to CarConfig.Scale, and welds each piece to
-	the part it rides on -- the body, a wheel, or a steering knuckle.
+	A template is a Model laid out like this, and needs nothing else:
 
-	The physics is derived from the measurements in CarConfig, which were taken
-	off the same model, so the hinges sit exactly inside the wheel meshes:
-	  * the body is a few invisible boxes, roughly the shape of the car
-	  * rear wheels hang off the body on a HingeConstraint motor
-	  * front wheels hang off a steering knuckle, which itself hangs off the
-	    body on a second hinge running vertically, driven as a servo
-	  * there is no suspension -- the wheels are hinged straight to the frame,
-	    which is far more stable than a spring setup and needs no tuning
-	  * the meshes are massless and never collide; they are only the look
+	  * Its pivot is car space: -Z forward, +Y up. The origin can be anywhere; a
+	    sensible spot is between the axles at axle height.
+	  * Wheels are parts named Wheel<F|R><L|R>, with a number after that for any
+	    extra axles and _<piece> after that for multi-part wheels: WheelFL,
+	    WheelRL2, WheelFR_Tyre. Every part of one wheel shares the name before the
+	    underscore, and axles run along X. A wheel's biggest part -- its tyre --
+	    sets where the wheel is and its radius. Front wheels steer. Parts named
+	    ..._Caliper, or with a Spin attribute of false, steer but do not roll.
+	  * A part named DriverSeat marks where the driver sits, and parts named
+	    PassengerSeat... mark the other seats. Each becomes a real seat of the
+	    same size and look.
+	  * Everything else is bodywork. A part with a Paint attribute of true takes
+	    the template's PaintColor attribute, if it has one. A part with a Lamp
+	    attribute of "Head" or "Tail" is a light, lit while someone drives.
+	  * Attributes on the Model override CarConfig.DefaultStats for this car.
 
-	The wheels sit tucked under the bodywork, which means wheel and body parts
-	overlap in space. They are in separate physics assemblies (a hinge is not a
-	weld), so without the collision groups set up below the solver would spend
-	every frame trying to shove the wheels out of the body and the car would
-	refuse to move.
+	What gets built is kept simple for the physics. The whole car is one
+	invisible box -- the Chassis, sized to the bodywork -- carrying a spring force
+	per wheel, a traction force and a steering torque, which CarPhysics sets. The
+	meshes are welded on, massless, and never collide. The wheels are not physical
+	at all: each hangs off the chassis on Motor6Ds that CarVisuals animates on
+	every client, so a car can have any number of wheels, of any size, at no cost
+	to the physics.
 ]]
 
-local PhysicsService = game:GetService("PhysicsService")
-local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 
 local CarConfig = require(script.Parent.CarConfig)
+local CarCatalog = require(script.Parent.CarCatalog)
 
-local DIM = CarConfig.Dimensions
-local LOOK = CarConfig.Appearance
 local PHYS = CarConfig.Physics
-local DRIVE = CarConfig.Driving
-local scaled = CarConfig.scaled
-
-local BODY_GROUP = "CarBody"
-local WHEEL_GROUP = "CarWheel"
-
--- Everything below is car space, derived from the measurements in CarConfig.
-local GROUND = -DIM.WheelRadius
-local HALF_WIDTH = DIM.Width / 2
-local HALF_TRACK = DIM.TrackWidth / 2
-local AXLE_Z = DIM.Wheelbase / 2
-
-local BODY_BOTTOM = GROUND + DIM.GroundClearance
-local FLOOR_Y = GROUND + DIM.FloorHeight
-local SEAT_Y = GROUND + DIM.SeatHeight
-local NOSE_TOP = GROUND + DIM.NoseHeight
-local BELT_Y = GROUND + DIM.BeltHeight
-local DECK_TOP = GROUND + DIM.DeckHeight
-local ROOF_Y = GROUND + DIM.RoofHeight
-
-local CABIN_LENGTH = DIM.CabinRear - DIM.CabinFront
-local CABIN_MID_Z = (DIM.CabinFront + DIM.CabinRear) / 2
-local INTERIOR_WIDTH = DIM.Width - DIM.SillWidth * 2
-local FLOOR_THICKNESS = scaled(0.12)
-local ROOF_THICKNESS = scaled(0.1)
-
--- Where the floor pan, the PrimaryPart, sits in car space.
-local CHASSIS_OFFSET = Vector3.new(0, FLOOR_Y - FLOOR_THICKNESS / 2, CABIN_MID_Z)
-
--- A hinge turns about its attachments' X axis.
-local AXLE_AXIS = CFrame.identity -- X stays on car +X: the axis wheels spin about
-local STEER_AXIS = CFrame.Angles(0, 0, math.pi / 2) -- X rotated onto car +Y: the axis the knuckles turn about
 
 local CarModel = {}
 
-type PartProps = {
-	Name: string,
-	Size: Vector3,
-	Offset: Vector3,
-	Shape: Enum.PartType?,
-	Color: Color3?,
-	Material: Enum.Material?,
-	Transparency: number?,
-	CanCollide: boolean?,
-	Massless: boolean?,
-	Density: number?,
-	CollisionGroup: string?,
+export type Stats = typeof(CarConfig.DefaultStats)
+
+type WheelPiece = { part: BasePart, spins: boolean }
+type WheelInfo = {
+	key: string,
+	pieces: { WheelPiece },
+	centre: Vector3, -- car space
+	diameter: number,
 }
 
-type MeshLook = {
-	Color: Color3,
-	Material: Enum.Material?,
-	Transparency: number?,
-	Reflectance: number?,
-	Lamp: string?, -- "Head" or "Tail": gets a light, which CarService switches on
-}
-
-type Corner = {
-	folder: Folder,
-	wheel: BasePart, -- spins
-	mount: BasePart, -- does not spin: the knuckle on a steered wheel, else the body
-}
-
-local WHEELS = {
-	{ Name = "FrontLeft", Key = "FL", Side = -1, End = -1, Steers = true },
-	{ Name = "FrontRight", Key = "FR", Side = 1, End = -1, Steers = true },
-	{ Name = "RearLeft", Key = "RL", Side = -1, End = 1, Steers = false },
-	{ Name = "RearRight", Key = "RR", Side = 1, End = 1, Steers = false },
-}
-
--- How each piece of the mesh template is dressed, by part name. Wheel pieces are
--- named Wheel<corner>_<piece> and looked up by the piece.
-local MESH_LOOKS: { [string]: MeshLook } = {
-	BodyLeft = { Color = LOOK.BodyColor, Reflectance = LOOK.PaintReflectance },
-	BodyRight = { Color = LOOK.BodyColor, Reflectance = LOOK.PaintReflectance },
-	Trim = { Color = LOOK.TrimColor },
-	Chrome = { Color = LOOK.ChromeColor, Material = Enum.Material.Metal },
-	Windows = {
-		Color = LOOK.GlassColor,
-		Material = Enum.Material.Glass,
-		Transparency = LOOK.GlassTransparency,
-		Reflectance = 0.15,
-	},
-	LampGlass = { Color = LOOK.LampGlassColor, Material = Enum.Material.Glass, Transparency = 0.55 },
-	HeadlightLeft = { Color = LOOK.HeadlightColor, Lamp = "Head" },
-	HeadlightRight = { Color = LOOK.HeadlightColor, Lamp = "Head" },
-	TaillightLeft = { Color = LOOK.TaillightColor, Lamp = "Tail" },
-	TaillightRight = { Color = LOOK.TaillightColor, Lamp = "Tail" },
-	Plates = { Color = LOOK.PlateColor },
-	Tyre = { Color = LOOK.TyreColor },
-	Rim = { Color = LOOK.RimColor, Material = Enum.Material.Metal },
-	Caliper = { Color = LOOK.CaliperColor },
-}
-
-local collisionGroupsReady = false
-
-local function ensureCollisionGroups(): boolean
-	if collisionGroupsReady then
-		return true
+local function findTemplate(carName: string): Model
+	local folder = ServerStorage:FindFirstChild(CarConfig.TemplateFolder)
+	if not folder then
+		error(("CarModel: ServerStorage.%s does not exist"):format(CarConfig.TemplateFolder), 3)
 	end
-	if not RunService:IsServer() then
-		return false
+	local template = folder:FindFirstChild(carName)
+	if template and template:IsA("Model") then
+		return template
 	end
-
-	local ok, err = pcall(function()
-		local registered = {}
-		for _, group in PhysicsService:GetRegisteredCollisionGroups() do
-			registered[group.name] = true
-		end
-		if not registered[BODY_GROUP] then
-			PhysicsService:RegisterCollisionGroup(BODY_GROUP)
-		end
-		if not registered[WHEEL_GROUP] then
-			PhysicsService:RegisterCollisionGroup(WHEEL_GROUP)
-		end
-		-- The one relationship that matters: a car's bodywork must ignore wheels.
-		PhysicsService:CollisionGroupSetCollidable(BODY_GROUP, WHEEL_GROUP, false)
-	end)
-
-	if not ok then
-		warn(("CarModel: could not set up collision groups (%s). The wheels are "):format(tostring(err))
-			.. "tucked under the bodywork, so without them the car will not drive.")
-		return false
+	-- Fallback to default car template or first available template if car model is not yet imported
+	local fallback = folder:FindFirstChild(CarConfig.DefaultCar)
+	if fallback and fallback:IsA("Model") then
+		return fallback
 	end
-
-	collisionGroupsReady = true
-	return true
+	for _, child in folder:GetChildren() do
+		if child:IsA("Model") then
+			return child
+		end
+	end
+	error(("CarModel: there is no car template ServerStorage.%s.%s"):format(CarConfig.TemplateFolder, carName), 3)
 end
 
-local function findMeshTemplate(): Model
-	local folder = ServerStorage:FindFirstChild("CarModels")
-	local template = folder and folder:FindFirstChild(CarConfig.MeshTemplate)
-	if not (template and template:IsA("Model")) then
-		error(
-			("CarModel: ServerStorage.CarModels.%s is missing. Import "):format(CarConfig.MeshTemplate)
-				.. "blender models/porsche/export/Porsche.fbx into Studio and move it there."
-		)
+--[[
+	A car's stats: the attributes on `source` -- a template, or a car it built --
+	falling back to CarConfig.DefaultStats.
+]]
+function CarModel.statsOf(source: Instance): Stats
+	local stats = table.clone(CarConfig.DefaultStats)
+	for key, default in CarConfig.DefaultStats do
+		local value = source:GetAttribute(key)
+		if value ~= nil and typeof(value) == typeof(default) then
+			stats[key] = value
+		end
 	end
-	return template
+	if stats.DisplayName == "" then
+		stats.DisplayName = source.Name
+	end
+	return stats
 end
 
-local function newPart(props: PartProps, base: CFrame, parent: Instance): Part
-	local part = Instance.new("Part")
-	part.Name = props.Name
-	part.Size = props.Size
-	part.Shape = props.Shape or Enum.PartType.Block
-	part.Color = props.Color or LOOK.TrimColor
-	part.Material = props.Material or Enum.Material.SmoothPlastic
-	part.Transparency = props.Transparency or 0
-	part.CanCollide = if props.CanCollide == nil then false else props.CanCollide
-	part.Massless = if props.Massless == nil then true else props.Massless
-	part.CollisionGroup = props.CollisionGroup or BODY_GROUP
-	part.CastShadow = part.Transparency < 1
-	part.TopSurface = Enum.SurfaceType.Smooth
-	part.BottomSurface = Enum.SurfaceType.Smooth
-	part.CFrame = base * CFrame.new(props.Offset)
-
-	if props.Density then
-		part.CustomPhysicalProperties = PhysicalProperties.new(props.Density, 0.3, 0.5, 1, 1)
+-- "WheelFR_Tyre" -> "FR", "Tyre"; "WheelRL2" -> "RL2", nil; anything else -> nil.
+local function parseWheelName(name: string): (string?, string?)
+	local key, rest = string.match(name, "^Wheel([FR][LR]%d*)(.*)$")
+	if not key then
+		return nil, nil
 	end
+	if rest == "" then
+		return key, nil
+	end
+	local piece = string.match(rest, "^_(.+)$")
+	if not piece then
+		return nil, nil
+	end
+	return key, piece
+end
 
-	part.Parent = parent
-	return part
+-- The axis-aligned bounds, in car space, of a part placed at `cf` in car space.
+local function boundsOf(cf: CFrame, size: Vector3): (Vector3, Vector3)
+	local half = size / 2
+	local x, y, z = cf.XVector, cf.YVector, cf.ZVector
+	local extent = Vector3.new(
+		math.abs(x.X) * half.X + math.abs(y.X) * half.Y + math.abs(z.X) * half.Z,
+		math.abs(x.Y) * half.X + math.abs(y.Y) * half.Y + math.abs(z.Y) * half.Z,
+		math.abs(x.Z) * half.X + math.abs(y.Z) * half.Y + math.abs(z.Z) * half.Z
+	)
+	return cf.Position - extent, cf.Position + extent
+end
+
+local function newFolder(name: string, parent: Instance): Folder
+	local folder = Instance.new("Folder")
+	folder.Name = name
+	folder.Parent = parent
+	return folder
 end
 
 local function weld(anchor: BasePart, part: BasePart)
@@ -208,12 +130,32 @@ local function weld(anchor: BasePart, part: BasePart)
 	joint.Parent = part
 end
 
-local function newAttachment(part: BasePart, name: string, position: Vector3, axis: CFrame): Attachment
-	local attachment = Instance.new("Attachment")
-	attachment.Name = name
-	attachment.CFrame = CFrame.new(position) * axis
-	attachment.Parent = part
-	return attachment
+-- Turns a template part into a passenger on the chassis: along for the ride,
+-- weightless, and invisible to physics and raycasts.
+local function carry(part: BasePart, cf: CFrame, parent: Instance)
+	part.Anchored = false
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.Massless = true
+	part.CFrame = cf
+	part.Parent = parent
+end
+
+-- An invisible, weightless part for the wheel joints to move.
+local function jointPart(name: string, cf: CFrame, parent: Instance): Part
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Size = Vector3.one * 0.2
+	part.Transparency = 1
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.Massless = true
+	part.CastShadow = false
+	part.CFrame = cf
+	part.Parent = parent
+	return part
 end
 
 -- The face of `part` pointing most nearly along `direction`.
@@ -229,13 +171,11 @@ local function faceToward(part: BasePart, direction: Vector3): Enum.NormalId
 end
 
 local function addLamp(lens: BasePart, kind: string, forward: Vector3)
-	lens:SetAttribute("Lamp", kind)
-
 	-- Dark until someone is driving; CarService owns the switch.
 	if kind == "Head" then
 		local light = Instance.new("SpotLight")
 		light.Name = "Lamp"
-		-- The imported meshes are not all oriented like the car, so aim by direction.
+		-- Imported meshes are not all oriented like the car, so aim by direction.
 		light.Face = faceToward(lens, forward)
 		light.Angle = 75
 		light.Range = 60
@@ -255,11 +195,11 @@ local function addLamp(lens: BasePart, kind: string, forward: Vector3)
 	end
 end
 
-local function addEnterPrompt(seat: BasePart, actionText: string)
+local function addEnterPrompt(seat: BasePart, actionText: string, carName: string)
 	local prompt = Instance.new("ProximityPrompt")
 	prompt.Name = "EnterPrompt"
 	prompt.ActionText = actionText
-	prompt.ObjectText = CarConfig.ModelName
+	prompt.ObjectText = carName
 	prompt.KeyboardKeyCode = Enum.KeyCode.E
 	prompt.GamepadKeyCode = Enum.KeyCode.ButtonX
 	prompt.HoldDuration = 0.15
@@ -268,106 +208,45 @@ local function addEnterPrompt(seat: BasePart, actionText: string)
 	prompt.Parent = seat
 end
 
-local function buildWheel(base: CFrame, chassis: BasePart, chassisOffset: Vector3, layout, parent: Instance): Corner
-	local wheelPosition = Vector3.new(layout.Side * HALF_TRACK, 0, layout.End * AXLE_Z)
+type SeatContext = {
+	base: CFrame,
+	car: Model,
+	chassis: BasePart,
+	displayName: string,
+	hitboxCentre: Vector3,
+	halfWidth: number,
+	groundY: number,
+}
 
-	local folder = Instance.new("Folder")
-	folder.Name = layout.Name
-	folder.Parent = parent
-
-	-- The physics wheel: a plain cylinder the tyre mesh is welded over.
-	local wheel = newPart({
-		Name = "Wheel",
-		Size = Vector3.new(DIM.WheelWidth, DIM.WheelRadius * 2, DIM.WheelRadius * 2),
-		Offset = wheelPosition,
-		Shape = Enum.PartType.Cylinder, -- a cylinder part rolls on its X axis
-		Transparency = 1,
-		CanCollide = true,
-		Massless = false,
-		CollisionGroup = WHEEL_GROUP,
-	}, base, folder)
-	wheel.CustomPhysicalProperties = PhysicalProperties.new(
-		PHYS.WheelDensity,
-		PHYS.WheelFriction,
-		PHYS.WheelElasticity,
-		PHYS.WheelFrictionWeight,
-		PHYS.WheelElasticityWeight
-	)
-
-	-- Rear wheels hang off the body; front wheels hang off a knuckle that
-	-- turns, so their spin axis turns with the steering.
-	local mount: BasePart = chassis
-	local mountPosition = wheelPosition - chassisOffset
-
-	if layout.Steers then
-		-- Deliberately not a tiny part: a light body wedged between the heavy
-		-- chassis and a driven wheel is what makes hinge cars jitter.
-		local knuckle = newPart({
-			Name = "SteerKnuckle",
-			Size = Vector3.new(0.8, 0.8, 0.8),
-			Offset = wheelPosition,
-			Transparency = 1,
-			Massless = false,
-			Density = PHYS.KnuckleDensity,
-			CollisionGroup = WHEEL_GROUP,
-		}, base, folder)
-
-		local steerHinge = Instance.new("HingeConstraint")
-		steerHinge.Name = "SteerHinge"
-		steerHinge.Attachment0 = newAttachment(chassis, "Steer" .. layout.Name, wheelPosition - chassisOffset, STEER_AXIS)
-		steerHinge.Attachment1 = newAttachment(knuckle, "Steer", Vector3.zero, STEER_AXIS)
-		steerHinge.ActuatorType = Enum.ActuatorType.Servo
-		steerHinge.ServoMaxTorque = DRIVE.SteerTorque
-		steerHinge.AngularSpeed = DRIVE.SteerSpeed
-		steerHinge.TargetAngle = 0
-		steerHinge.Parent = knuckle
-
-		mount = knuckle
-		mountPosition = Vector3.zero
-	end
-
-	local driveHinge = Instance.new("HingeConstraint")
-	driveHinge.Name = "DriveHinge"
-	driveHinge.Attachment0 = newAttachment(mount, "Axle" .. layout.Name, mountPosition, AXLE_AXIS)
-	driveHinge.Attachment1 = newAttachment(wheel, "Axle", Vector3.zero, AXLE_AXIS)
-	driveHinge.ActuatorType = Enum.ActuatorType.Motor
-	driveHinge.MotorMaxAcceleration = DRIVE.MotorMaxAcceleration
-	driveHinge.MotorMaxTorque = 0 -- the drive scripts set this every frame
-	driveHinge.AngularVelocity = 0
-	driveHinge:SetAttribute("Driven", DRIVE.AllWheelDrive or not layout.Steers)
-	driveHinge.Parent = wheel
-
-	return { folder = folder, wheel = wheel, mount = mount }
-end
-
-local function buildSeat(base: CFrame, chassis: BasePart, car: Model, isDriver: boolean)
-	local side = if isDriver then -1 else 1 -- the driver sits on the left
-	local cushion = scaled(0.12)
-
+local function buildSeat(ctx: SeatContext, name: string, cf: CFrame, look: BasePart?, isDriver: boolean)
 	local seat: BasePart = if isDriver then Instance.new("VehicleSeat") else Instance.new("Seat")
-	seat.Name = if isDriver then "DriverSeat" else "PassengerSeat"
-	seat.Size = Vector3.new(scaled(0.48), cushion, scaled(0.49))
-	seat.CFrame = base * CFrame.new(side * DIM.SeatOffset, SEAT_Y - cushion / 2, DIM.SeatZ)
-	seat.Color = LOOK.TrimColor
-	seat.Material = Enum.Material.Fabric
+	seat.Name = name
+	seat.Size = if look then look.Size else Vector3.new(2, 0.5, 2)
+	seat.CFrame = ctx.base * cf
+	if look then
+		seat.Color = look.Color
+		seat.Material = look.Material
+		seat.Transparency = look.Transparency
+		seat.Reflectance = look.Reflectance
+	else
+		seat.Transparency = 1
+	end
 	seat.CanCollide = false
 	-- No sitting down by touch: the prompt is the way in, and otherwise anyone
-	-- getting out brushes the other seat on the way and is pulled into it.
+	-- getting out brushes another seat on the way and is pulled into it.
 	seat.CanTouch = false
 	seat.Massless = true
-	seat.CollisionGroup = BODY_GROUP
 	seat.TopSurface = Enum.SurfaceType.Smooth
 	seat.BottomSurface = Enum.SurfaceType.Smooth
 
-	-- The roof is closed, so nobody can hop straight up out of it: CarController
-	-- stands whoever gets out here instead, beside their door, in seat space.
-	seat:SetAttribute(
-		"ExitOffset",
-		Vector3.new(side * (HALF_WIDTH + 2.5) - side * DIM.SeatOffset, GROUND + 3 - (SEAT_Y - cushion / 2), 0)
-	)
+	-- Nobody can hop straight up out of a car with a roof: CarController stands
+	-- whoever gets out here instead, beside their side of the car, in seat space.
+	local side = if cf.X < ctx.hitboxCentre.X then -1 else 1
+	local exit = Vector3.new(ctx.hitboxCentre.X + side * (ctx.halfWidth + 2.5), ctx.groundY + 3, cf.Z)
+	seat:SetAttribute("ExitOffset", cf:PointToObjectSpace(exit))
 
 	if isDriver then
-		-- The legacy VehicleSeat drivetrain is unused: the constraints do the work.
+		-- The legacy VehicleSeat drivetrain is unused: CarPhysics does the work.
 		local vehicleSeat = seat :: VehicleSeat
 		vehicleSeat.MaxSpeed = 0
 		vehicleSeat.Torque = 0
@@ -376,161 +255,252 @@ local function buildSeat(base: CFrame, chassis: BasePart, car: Model, isDriver: 
 		seat:SetAttribute("IsDriverSeat", true)
 	end
 
-	seat.Parent = car
-	weld(chassis, seat)
-	addEnterPrompt(seat, if isDriver then "Drive" else "Ride")
-end
-
--- Clones the mesh template onto the car and welds every piece to what carries it.
-local function dress(base: CFrame, car: Model, chassis: BasePart, corners: { [string]: Corner })
-	local skin = findMeshTemplate():Clone()
-	skin:ScaleTo(CarConfig.Scale)
-	local pivot = skin:GetPivot()
-
-	local bodywork = Instance.new("Folder")
-	bodywork.Name = "Bodywork"
-	bodywork.Parent = car
-
-	for _, mesh in skin:GetChildren() do
-		if not mesh:IsA("MeshPart") then
-			continue
-		end
-
-		local cornerKey, piece = string.match(mesh.Name, "^Wheel(%u%u)_(%a+)$")
-		local look = MESH_LOOKS[piece or mesh.Name]
-		local corner = cornerKey and corners[cornerKey]
-		if not look or (cornerKey and not corner) then
-			warn(("CarModel: no idea how to dress mesh %q, leaving it off"):format(mesh.Name))
-			continue
-		end
-
-		mesh.CFrame = base * pivot:ToObjectSpace(mesh.CFrame)
-		mesh.Anchored = false
-		mesh.CanCollide = false
-		mesh.CanTouch = false
-		mesh.Massless = true
-		mesh.Color = look.Color
-		mesh.Material = look.Material or Enum.Material.SmoothPlastic
-		mesh.Transparency = look.Transparency or 0
-		mesh.Reflectance = look.Reflectance or 0
-
-		if corner then
-			mesh.CollisionGroup = WHEEL_GROUP
-			mesh.Parent = corner.folder
-			-- The caliper stays put (or steers) while the tyre and rim spin.
-			weld(if piece == "Caliper" then corner.mount else corner.wheel, mesh)
-		else
-			mesh.CollisionGroup = BODY_GROUP
-			mesh.Parent = bodywork
-			weld(chassis, mesh)
-			if look.Lamp then
-				addLamp(mesh, look.Lamp, base.LookVector)
-			end
-		end
-	end
-
-	skin:Destroy()
+	seat.Parent = ctx.car
+	weld(ctx.chassis, seat)
+	addEnterPrompt(seat, if isDriver then "Drive" else "Ride", ctx.displayName)
 end
 
 --[[
-	Builds a car whose car-space origin lands on `base`. The model comes back
-	unparented with PrimaryPart set to the chassis, so car:PivotTo() moves it.
+	Builds the car `carName` with its car-space origin on `base`. The model comes
+	back unparented, with PrimaryPart set to the chassis, so car:PivotTo() moves
+	it.
 ]]
-function CarModel.build(base: CFrame): Model
-	ensureCollisionGroups()
+function CarModel.build(carName: string, base: CFrame, customPaint: Color3?): Model
+	local template = findTemplate(carName)
+	local stats = CarModel.statsOf(template)
+
+	local catalog = CarCatalog.get(carName)
+	if catalog then
+		stats.DisplayName = catalog.DisplayName
+		stats.TopSpeed = catalog.TopSpeed
+		stats.Acceleration = catalog.Acceleration
+		stats.Grip = catalog.Grip
+		stats.DriveType = catalog.DriveType
+	end
+
+	local skin = template:Clone()
+	-- Joints the template came with would tie wheels to bodywork.
+	for _, descendant in skin:GetDescendants() do
+		if descendant:IsA("JointInstance") or descendant:IsA("WeldConstraint") then
+			descendant:Destroy()
+		end
+	end
+	if stats.Scale ~= 1 then
+		skin:ScaleTo(skin:GetScale() * stats.Scale)
+	end
+
+	-- Read everything in car space before moving anything: moving parts can move
+	-- a Model's pivot.
+	local pivot = skin:GetPivot()
+	local placed: { [BasePart]: CFrame } = {}
+	local wheels: { [string]: WheelInfo } = {}
+	local wheelKeys: { string } = {}
+	local seatMarkers: { BasePart } = {}
+	local bodyParts: { BasePart } = {}
+	local bodyMin, bodyMax = Vector3.one * math.huge, Vector3.one * -math.huge
+
+	for _, part in skin:GetDescendants() do
+		if not part:IsA("BasePart") then
+			continue
+		end
+		local cf = pivot:ToObjectSpace(part.CFrame)
+		placed[part] = cf
+		local lo, hi = boundsOf(cf, part.Size)
+
+		local key, piece = parseWheelName(part.Name)
+		if key then
+			local wheel = wheels[key]
+			if not wheel then
+				wheel = { key = key, pieces = {}, centre = cf.Position, diameter = 0 }
+				wheels[key] = wheel
+				table.insert(wheelKeys, key)
+			end
+			local isCaliper = piece ~= nil and string.match(piece, "Caliper$") ~= nil
+			table.insert(wheel.pieces, { part = part, spins = not isCaliper and part:GetAttribute("Spin") ~= false })
+
+			local extent = hi - lo
+			local diameter = math.max(extent.Y, extent.Z)
+			if diameter > wheel.diameter then
+				wheel.diameter = diameter
+				wheel.centre = (lo + hi) / 2
+			end
+		elseif part.Name == "DriverSeat" or string.match(part.Name, "^PassengerSeat") then
+			table.insert(seatMarkers, part)
+		else
+			table.insert(bodyParts, part)
+			bodyMin = bodyMin:Min(lo)
+			bodyMax = bodyMax:Max(hi)
+		end
+	end
+
+	if #wheelKeys == 0 then
+		error(("CarModel: %s has no wheels -- name them WheelFL, WheelFR, WheelRL, WheelRR"):format(carName), 2)
+	end
+	if #bodyParts == 0 then
+		error(("CarModel: %s has no bodywork"):format(carName), 2)
+	end
+	table.sort(wheelKeys)
+
+	local radiusSum, axleSum, groundY = 0, 0, math.huge
+	for _, key in wheelKeys do
+		local wheel = wheels[key]
+		radiusSum += wheel.diameter / 2
+		axleSum += wheel.centre.Y
+		groundY = math.min(groundY, wheel.centre.Y - wheel.diameter / 2)
+	end
+	local radius = radiusSum / #wheelKeys
+	local axleY = axleSum / #wheelKeys
+
+	-- The hitbox: the bodywork's bounds, trimmed, floored above the ground.
+	local floorY = axleY - radius * PHYS.HitboxFloor
+	local topY = math.max(bodyMax.Y, floorY + radius)
+	local hitboxSize = Vector3.new(
+		math.max((bodyMax.X - bodyMin.X) * PHYS.HitboxWidth, 1),
+		topY - floorY,
+		math.max((bodyMax.Z - bodyMin.Z) * PHYS.HitboxLength, 1)
+	)
+	local hitboxCentre = Vector3.new((bodyMin.X + bodyMax.X) / 2, (floorY + topY) / 2, (bodyMin.Z + bodyMax.Z) / 2)
 
 	local car = Instance.new("Model")
-	car.Name = CarConfig.ModelName
+	car.Name = stats.DisplayName
 
-	-- The floor pan. Central and low, so it makes a good PrimaryPart: its
-	-- LookVector is the car's forward and its CFrame is the model's pivot.
-	local chassis = newPart({
-		Name = "Chassis",
-		Size = Vector3.new(INTERIOR_WIDTH, FLOOR_THICKNESS, CABIN_LENGTH),
-		Offset = CHASSIS_OFFSET,
-		Transparency = 1,
-		CanCollide = true,
-		Massless = false,
-		Density = PHYS.BodyDensity,
-	}, base, car)
+	local chassis = Instance.new("Part")
+	chassis.Name = "Chassis"
+	chassis.Size = hitboxSize
+	chassis.CFrame = base * CFrame.new(hitboxCentre)
+	chassis.Transparency = 1
+	chassis.CastShadow = false
+	chassis.CanCollide = true
+	chassis.TopSurface = Enum.SurfaceType.Smooth
+	chassis.BottomSurface = Enum.SurfaceType.Smooth
+	chassis.CustomPhysicalProperties = PhysicalProperties.new(PHYS.HitboxDensity, PHYS.HitboxFriction, 0, 1, 1)
+	chassis.Parent = car
 	car.PrimaryPart = chassis
 
-	-- The shape the car collides with: an open tub under a roof panel, all
-	-- welded into one assembly with the floor pan.
-	local hitbox = Instance.new("Folder")
-	hitbox.Name = "Hitbox"
-	hitbox.Parent = car
+	-- Where CarPhysics pushes the car along and turns it.
+	local centre = Instance.new("Attachment")
+	centre.Name = "Centre"
+	centre.Parent = chassis
 
-	local sillMidY = (BODY_BOTTOM + BELT_Y) / 2
-	local noseLength = DIM.CabinFront - DIM.Front
-	local tailLength = DIM.Rear - DIM.CabinRear
-	local roofLength = DIM.RoofRear - DIM.RoofFront
+	local traction = Instance.new("VectorForce")
+	traction.Name = "Traction"
+	traction.Attachment0 = centre
+	traction.RelativeTo = Enum.ActuatorRelativeTo.World
+	traction.ApplyAtCenterOfMass = true
+	traction.Force = Vector3.zero
+	traction.Visible = false
+	traction.Parent = chassis
 
-	local boxes: { PartProps } = {
-		{
-			Name = "Nose",
-			Size = Vector3.new(DIM.Width, NOSE_TOP - BODY_BOTTOM, noseLength),
-			Offset = Vector3.new(0, (BODY_BOTTOM + NOSE_TOP) / 2, DIM.Front + noseLength / 2),
-		},
-		{
-			Name = "Tail",
-			Size = Vector3.new(DIM.Width, DECK_TOP - BODY_BOTTOM, tailLength),
-			Offset = Vector3.new(0, (BODY_BOTTOM + DECK_TOP) / 2, DIM.CabinRear + tailLength / 2),
-		},
-		{
-			Name = "SillLeft",
-			Size = Vector3.new(DIM.SillWidth, BELT_Y - BODY_BOTTOM, CABIN_LENGTH),
-			Offset = Vector3.new(-(HALF_WIDTH - DIM.SillWidth / 2), sillMidY, CABIN_MID_Z),
-		},
-		{
-			Name = "SillRight",
-			Size = Vector3.new(DIM.SillWidth, BELT_Y - BODY_BOTTOM, CABIN_LENGTH),
-			Offset = Vector3.new(HALF_WIDTH - DIM.SillWidth / 2, sillMidY, CABIN_MID_Z),
-		},
-		{
-			Name = "Roof",
-			Size = Vector3.new(DIM.RoofWidth, ROOF_THICKNESS, roofLength),
-			Offset = Vector3.new(0, ROOF_Y - ROOF_THICKNESS / 2, DIM.RoofFront + roofLength / 2),
-		},
+	local steering = Instance.new("Torque")
+	steering.Name = "Steering"
+	steering.Attachment0 = centre
+	steering.RelativeTo = Enum.ActuatorRelativeTo.World
+	steering.Torque = Vector3.zero
+	steering.Parent = chassis
+
+	local bodywork = newFolder("Bodywork", car)
+	local paint = customPaint or (catalog and catalog.DefaultColor) or template:GetAttribute("PaintColor")
+	for _, part in bodyParts do
+		carry(part, base * placed[part], bodywork)
+		if part:GetAttribute("Paint") == true and typeof(paint) == "Color3" then
+			part.Color = paint
+		end
+		weld(chassis, part)
+
+		local lamp = part:GetAttribute("Lamp")
+		if lamp == "Head" or lamp == "Tail" then
+			addLamp(part, lamp, base.LookVector)
+		end
+	end
+
+	local wheelsFolder = newFolder("Wheels", car)
+	for _, key in wheelKeys do
+		local wheel = wheels[key]
+		local wheelRadius = wheel.diameter / 2
+		local steers = string.sub(key, 1, 1) == "F"
+		local driven = stats.DriveType == "AWD"
+			or (stats.DriveType == "RWD" and not steers)
+			or (stats.DriveType == "FWD" and steers)
+		local travel = wheelRadius * stats.SuspensionTravel
+		local inChassis = wheel.centre - hitboxCentre
+
+		-- The spring pushes up through the top of the wheel's travel.
+		local mount = Instance.new("Attachment")
+		mount.Name = "Wheel" .. key
+		mount.Position = inChassis + Vector3.new(0, travel, 0)
+		mount:SetAttribute("Radius", wheelRadius)
+		mount:SetAttribute("Travel", travel)
+		mount:SetAttribute("Steers", steers)
+		mount:SetAttribute("Driven", driven)
+		mount.Parent = chassis
+
+		local spring = Instance.new("VectorForce")
+		spring.Name = "Spring"
+		spring.Attachment0 = mount
+		spring.RelativeTo = Enum.ActuatorRelativeTo.World
+		spring.Force = Vector3.zero
+		spring.Visible = false
+		spring.Parent = mount
+
+		-- Hub: rides the suspension and steers. Spinner: rolls, on the hub.
+		local folder = newFolder("Wheel" .. key, wheelsFolder)
+		local at = base * CFrame.new(wheel.centre)
+
+		local hub = jointPart("Hub", at, folder)
+		local suspension = Instance.new("Motor6D")
+		suspension.Name = "Suspension"
+		suspension.Part0 = chassis
+		suspension.Part1 = hub
+		suspension.C0 = CFrame.new(inChassis)
+		suspension.Parent = hub
+
+		local spinner = jointPart("Spinner", at, folder)
+		local spin = Instance.new("Motor6D")
+		spin.Name = "Spin"
+		spin.Part0 = hub
+		spin.Part1 = spinner
+		spin.Parent = spinner
+
+		for _, piece in wheel.pieces do
+			carry(piece.part, base * placed[piece.part], folder)
+			weld(if piece.spins then spinner else hub, piece.part)
+		end
+	end
+
+	local seatContext: SeatContext = {
+		base = base,
+		car = car,
+		chassis = chassis,
+		displayName = stats.DisplayName,
+		hitboxCentre = hitboxCentre,
+		halfWidth = hitboxSize.X / 2,
+		groundY = groundY,
 	}
-
-	for _, props in boxes do
-		props.Transparency = 1
-		props.CanCollide = true
-		props.Massless = false
-		props.Density = PHYS.BodyDensity
-		weld(chassis, newPart(props, base, hitbox))
+	local haveDriver = false
+	for _, marker in seatMarkers do
+		local isDriver = marker.Name == "DriverSeat" and not haveDriver
+		haveDriver = haveDriver or isDriver
+		buildSeat(seatContext, if isDriver then "DriverSeat" else marker.Name, placed[marker], marker, isDriver)
+	end
+	if not haveDriver then
+		warn(("CarModel: %s has no DriverSeat marker; guessing where the driver sits"):format(carName))
+		local guess = CFrame.new(hitboxCentre.X - hitboxSize.X * 0.2, axleY + radius * 0.5, hitboxCentre.Z)
+		buildSeat(seatContext, "DriverSeat", guess, nil, true)
 	end
 
-	-- Hidden mass, slung as low as the floor allows.
-	local ballastHeight = scaled(0.1)
-	weld(
-		chassis,
-		newPart({
-			Name = "Ballast",
-			Size = Vector3.new(INTERIOR_WIDTH * 0.8, ballastHeight, DIM.Wheelbase * 0.875),
-			Offset = Vector3.new(0, BODY_BOTTOM + ballastHeight / 2, 0),
-			Transparency = 1,
-			Massless = false,
-			Density = PHYS.BallastDensity,
-		}, base, hitbox)
-	)
-
-	local wheels = Instance.new("Folder")
-	wheels.Name = "Wheels"
-	wheels.Parent = car
-
-	local corners: { [string]: Corner } = {}
-	for _, layout in WHEELS do
-		corners[layout.Key] = buildWheel(base, chassis, CHASSIS_OFFSET, layout, wheels)
+	for key, value in stats do
+		car:SetAttribute(key, value)
 	end
-
-	buildSeat(base, chassis, car, true)
-	buildSeat(base, chassis, car, false)
-
-	dress(base, car, chassis, corners)
-
+	car:SetAttribute("CarId", carName)
+	if paint and typeof(paint) == "Color3" then
+		car:SetAttribute("PaintColor", paint)
+	end
+	car:SetAttribute("CarTemplate", carName)
+	car:SetAttribute("OriginOffset", hitboxCentre) -- the chassis, in car space
+	car:SetAttribute("GroundOffset", -groundY) -- how far the origin sits above the bottoms of the wheels
 	car:SetAttribute("DriveableCar", true)
+
+	skin:Destroy()
 	return car
 end
 
@@ -539,27 +509,30 @@ end
 	since -- the `base` that would build it again in the same spot.
 ]]
 function CarModel.originOf(car: Model): CFrame
-	assert(car.PrimaryPart, "CarModel.originOf: the car has no PrimaryPart")
-	return car.PrimaryPart.CFrame * CFrame.new(-CHASSIS_OFFSET)
+	local offset = car:GetAttribute("OriginOffset")
+	assert(car.PrimaryPart and typeof(offset) == "Vector3", "CarModel.originOf: not a car CarModel built")
+	return car.PrimaryPart.CFrame * CFrame.new(-offset)
 end
 
 --[[
-	The car's key dimensions, for checking the proportions are honest.
+	One line about a built car, for the Output window.
 ]]
-function CarModel.describe(): string
-	local perMetre = CarConfig.StudsPerMetre * CarConfig.Scale
-	return string.format(
-		"%s at %.2fx life size: %.2f x %.2f m, %.2f m wheelbase, %.2f m wheels, roof %.2f m "
-			.. "(%.1f x %.1f studs)",
-		CarConfig.ModelName,
-		CarConfig.Scale,
-		(DIM.Rear - DIM.Front) / perMetre,
-		DIM.Width / perMetre,
-		DIM.Wheelbase / perMetre,
-		DIM.WheelRadius * 2 / perMetre,
-		DIM.RoofHeight / perMetre,
-		DIM.Rear - DIM.Front,
-		DIM.Width
+function CarModel.describe(car: Model): string
+	local chassis = car.PrimaryPart
+	local wheelCount = 0
+	for _, child in (car:FindFirstChild("Wheels") or car):GetChildren() do
+		if child:IsA("Folder") then
+			wheelCount += 1
+		end
+	end
+	return ("%s: %.1f x %.1f x %.1f studs, %d wheels, mass %.0f, top speed %d studs/s"):format(
+		car.Name,
+		chassis and chassis.Size.X or 0,
+		chassis and chassis.Size.Y or 0,
+		chassis and chassis.Size.Z or 0,
+		wheelCount,
+		chassis and chassis:GetMass() or 0,
+		car:GetAttribute("TopSpeed") or 0
 	)
 end
 

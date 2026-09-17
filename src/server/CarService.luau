@@ -1,15 +1,19 @@
 --[[
 	CarService -- spawns the cars and hands control of one to whoever sits in it.
 
-	Control is shared deliberately. The driver's client gets network ownership of
-	the car's parts and drives them locally, so the car answers the keyboard with
-	no round trip; it also relays its input up here, and this service runs the
-	same CarDrive maths on it. That second path is what makes the car work if
-	ownership has not transferred yet, and keeps the constraint values the server
-	replicates to other players in step with what the driver is doing.
+	Whoever drives a car simulates it: the driver's client gets network ownership
+	and runs CarPhysics on its own input, so the car answers the keyboard with no
+	round trip. An empty car belongs to the server, which runs CarPhysics to hold
+	it parked on its springs. Only one side writes a car's forces at a time --
+	two writers would fight over the replicated values.
 
-	Everything that has to be authoritative stays here: seating, the lights,
-	holding an empty car still, and putting a flipped one back on its wheels.
+	The driver also relays its input here. The server does not drive with it; it
+	turns it into the SteerInput, Braking and Handbrake attributes, which every
+	other client's CarVisuals reads to turn that car's wheels and light its brake
+	lamps.
+
+	Everything that has to be authoritative stays here too: seating, the lights,
+	and putting a flipped or lost car back where it spawned.
 ]]
 
 local Players = game:GetService("Players")
@@ -19,27 +23,37 @@ local Workspace = game:GetService("Workspace")
 
 local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
 local CarConfig = require(CarFolder.CarConfig)
-local CarDrive = require(CarFolder.CarDrive)
 local CarModel = require(CarFolder.CarModel)
+local CarPhysics = require(CarFolder.CarPhysics)
 
 local RESET = CarConfig.Reset
+local DRIVE = CarConfig.Driving
 
 local GROUND_PROBE_ABOVE = 10
 local GROUND_PROBE_DEPTH = 200
+local STEER_STEP = 0.05 -- relayed steering is rounded to this, so a steady hand replicates nothing
 
 local CarService = {}
 
 type Entry = {
 	car: Model,
-	state: CarDrive.State,
+	state: CarPhysics.State,
 	seat: any, -- the VehicleSeat; typed loosely so Sit/Occupant need no casts
 	driver: Player?,
-	input: CarDrive.Input,
+	input: CarPhysics.Input,
 	flippedFor: number,
+}
+
+type Placement = {
+	car: string, -- template name
+	origin: CFrame, -- car-space origin
+	snap: boolean, -- drop onto the floor underneath first
+	customPaint: Color3?,
 }
 
 local entries: { Entry } = {}
 local inputRemote: RemoteEvent
+local parked = CarPhysics.parkedInput()
 
 local function debugPrint(message: string, ...)
 	if CarConfig.Debug then
@@ -55,24 +69,12 @@ local function forEachPart(car: Model, apply: (BasePart) -> ())
 	end
 end
 
-local function setNetworkOwner(car: Model, owner: Player?): number
-	local count = 0
-	forEachPart(car, function(part)
-		if part.Anchored then
-			return
-		end
-		local ok = pcall(function()
-			if owner then
-				part:SetNetworkOwner(owner)
-			else
-				part:SetNetworkOwnershipAuto()
-			end
-		end)
-		if ok then
-			count += 1
-		end
-	end)
-	return count
+-- nil hands the car to the server, which is who simulates an empty car.
+local function setNetworkOwner(car: Model, owner: Player?)
+	local chassis = car.PrimaryPart
+	if chassis and not chassis.Anchored then
+		pcall(chassis.SetNetworkOwner, chassis, owner)
+	end
 end
 
 local function setLights(car: Model, on: boolean)
@@ -88,13 +90,18 @@ local function setLights(car: Model, on: boolean)
 	end)
 end
 
-local function findEntry(car: Model): Entry?
-	for _, entry in entries do
-		if entry.car == car then
-			return entry
-		end
-	end
-	return nil
+-- Publishes what the driver is doing, for everyone else's CarVisuals.
+local function showInput(entry: Entry, input: CarPhysics.Input)
+	local car = entry.car
+	local forwardSpeed = CarPhysics.forwardSpeed(entry.state)
+	local threshold = DRIVE.BrakeSpeedThreshold
+	local braking = input.handbrake
+		or (input.throttle > 0.05 and forwardSpeed < -threshold)
+		or (input.throttle < -0.05 and forwardSpeed > threshold)
+
+	car:SetAttribute("SteerInput", math.round(input.steer / STEER_STEP) * STEER_STEP)
+	car:SetAttribute("Braking", braking)
+	car:SetAttribute("Handbrake", input.handbrake)
 end
 
 local function entryForDriver(player: Player): Entry?
@@ -117,7 +124,7 @@ local function resetCar(entry: Entry)
 		part.AssemblyLinearVelocity = Vector3.zero
 		part.AssemblyAngularVelocity = Vector3.zero
 	end)
-	CarDrive.park(entry.state)
+	CarPhysics.park(entry.state)
 	debugPrint("reset %s to its spawn", entry.car.Name)
 end
 
@@ -130,18 +137,19 @@ local function onOccupantChanged(entry: Entry)
 
 	local driver = occupant and Players:GetPlayerFromCharacter(occupant.Parent)
 	entry.driver = driver
-	entry.input = CarDrive.idleInput()
+	entry.input = CarPhysics.idleInput()
 
 	if driver then
-		local owned = setNetworkOwner(entry.car, driver)
+		setNetworkOwner(entry.car, driver)
 		setLights(entry.car, true)
-		debugPrint("%s is driving; network ownership of %d parts handed over", driver.Name, owned)
+		debugPrint("%s is driving %s", driver.Name, entry.car.Name)
 	else
+		CarPhysics.park(entry.state)
 		setNetworkOwner(entry.car, nil)
-		CarDrive.park(entry.state)
 		setLights(entry.car, false)
 		debugPrint("%s is empty again", entry.car.Name)
 	end
+	showInput(entry, entry.input)
 end
 
 local function bindSeat(entry: Entry, seat: any)
@@ -184,11 +192,11 @@ local function carContainer(): Folder
 	return folder
 end
 
--- Drops a spawn point onto whatever floor is under it, so a car never starts
--- with its wheels inside the map. The ray starts only a little above the point,
--- which keeps it beneath any roof over the spawn, and passes through parts a car
--- would fall through (the dealership's display pads, for one).
-local function restOnGround(origin: CFrame): CFrame
+-- Moves a car-space origin down onto whatever floor is under it, so the wheels
+-- (`groundOffset` below the origin) just touch it. The ray starts only a little
+-- above the point, which keeps it beneath any roof over the spawn, and passes
+-- through parts a car would fall through (the dealership's display pads, for one).
+local function restOnGround(origin: CFrame, groundOffset: number): CFrame
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = { carContainer() }
@@ -199,43 +207,70 @@ local function restOnGround(origin: CFrame): CFrame
 	if not hit then
 		return origin
 	end
-	return origin.Rotation + hit.Position + Vector3.new(0, CarConfig.Dimensions.WheelRadius + 0.2, 0)
+	return origin.Rotation + hit.Position + Vector3.new(0, groundOffset + 0.2, 0)
+end
+
+local function build(placement: Placement): Model
+	local car = CarModel.build(placement.car, placement.origin, placement.customPaint)
+	if placement.snap then
+		local rested = restOnGround(placement.origin, car:GetAttribute("GroundOffset") or 0)
+		car:PivotTo(CFrame.new(rested.Position - placement.origin.Position) * car:GetPivot())
+	end
+	return car
 end
 
 -- Cars left in Workspace.Cars from Studio (see placeInStudio) are stand-ins
--- marking where cars go. Takes them out and returns where each one stood.
-local function takeStandIns(): { CFrame }
-	local origins = {}
+-- marking where cars go. Takes them out and returns what each one was, and where.
+local function takeStandIns(): { Placement }
+	local placements: { Placement } = {}
 	for _, standIn in carContainer():GetChildren() do
-		if standIn:IsA("Model") and standIn:GetAttribute("DriveableCar") and standIn.PrimaryPart then
-			table.insert(origins, CarModel.originOf(standIn))
-			standIn:Destroy()
+		if not (standIn:IsA("Model") and standIn:GetAttribute("DriveableCar") and standIn.PrimaryPart) then
+			continue
 		end
+		local carName = standIn:GetAttribute("CarTemplate")
+		local ok, origin = pcall(CarModel.originOf, standIn)
+		table.insert(placements, {
+			car = if typeof(carName) == "string" then carName else CarConfig.DefaultCar,
+			origin = if ok then origin else standIn:GetPivot(),
+			snap = not ok,
+		})
+		standIn:Destroy()
 	end
-	return origins
+	return placements
 end
 
-local function defaultSpawns(): { CFrame }
-	local origins = {}
+local function defaultSpawns(): { Placement }
+	local placements: { Placement } = {}
 	for _, spawn in CarConfig.Spawns do
-		table.insert(origins, restOnGround(spawn))
+		table.insert(placements, { car = spawn.Car or CarConfig.DefaultCar, origin = spawn.CFrame, snap = true })
 	end
-	return origins
+	return placements
 end
 
 --[[
-	Builds a car at `pivot` (its car-space origin) and wires up its seats.
+	Builds the car `carName` at `origin` (its car-space origin), dropped onto the
+	floor unless `snapToGround` is false, and wires up its seats.
 ]]
-function CarService.spawnCar(pivot: CFrame): Model?
-	local car = CarModel.build(pivot)
+function CarService.spawnCar(carName: string, origin: CFrame, snapToGround: boolean?, customPaint: Color3?): Model?
+	local ok, result = pcall(build, {
+		car = carName,
+		origin = origin,
+		snap = snapToGround ~= false,
+		customPaint = customPaint,
+	})
+	if not ok then
+		warn(("CarService: could not build %s: %s"):format(carName, tostring(result)))
+		return nil
+	end
+
+	local car: Model = result
 	car.Parent = carContainer()
 	car:SetAttribute("SpawnPivot", car:GetPivot())
 
-	local state = CarDrive.collect(car)
+	local state = CarPhysics.collect(car)
 	local driverSeat = car:FindFirstChild("DriverSeat")
-
 	if not state or not driverSeat then
-		warn("CarService: built a car with no drivable constraints or no driver seat")
+		warn(("CarService: %s was built without its forces or a driver seat"):format(carName))
 		car:Destroy()
 		return nil
 	end
@@ -245,7 +280,7 @@ function CarService.spawnCar(pivot: CFrame): Model?
 		state = state,
 		seat = driverSeat,
 		driver = nil,
-		input = CarDrive.idleInput(),
+		input = CarPhysics.idleInput(),
 		flippedFor = 0,
 	}
 	table.insert(entries, entry)
@@ -256,33 +291,36 @@ function CarService.spawnCar(pivot: CFrame): Model?
 		end
 	end
 
-	CarDrive.park(state)
+	setNetworkOwner(car, nil)
 	setLights(car, false)
-
+	showInput(entry, entry.input)
 	return car
 end
 
 local function onInputReceived(player: Player, raw: any)
 	local entry = entryForDriver(player)
 	if not entry then
-		return -- not driving anything, so nothing to steer
+		return -- not driving anything, so nothing to show
 	end
-	entry.input = CarDrive.sanitizeInput(raw)
+	entry.input = CarPhysics.sanitizeInput(raw)
+	showInput(entry, entry.input)
 end
 
--- Applies the relayed input, and recovers cars that are stuck or lost.
+-- Holds empty cars on their springs, and recovers cars that are stuck or lost.
 local function step(deltaTime: number)
 	for _, entry in entries do
 		local chassis = entry.car.PrimaryPart
-		if not chassis then
+		if not chassis or not entry.car.Parent then
 			continue
 		end
 
 		if entry.driver then
-			CarDrive.apply(entry.state, entry.input, deltaTime)
+			-- The driver's client simulates this car.
 			entry.flippedFor = 0
 			continue
 		end
+
+		CarPhysics.apply(entry.state, parked, deltaTime)
 
 		if chassis.Position.Y < RESET.MinHeight then
 			resetCar(entry)
@@ -305,27 +343,42 @@ function CarService.start()
 	inputRemote.Parent = ReplicatedStorage
 	inputRemote.OnServerEvent:Connect(onInputReceived)
 
-	local origins = takeStandIns()
-	if #origins == 0 then
-		origins = defaultSpawns()
+	local placements = takeStandIns()
+	if #placements == 0 then
+		placements = defaultSpawns()
 	end
-	for _, origin in origins do
-		CarService.spawnCar(origin)
+	for _, placement in placements do
+		CarService.spawnCar(placement.car, placement.origin, placement.snap)
 	end
 
 	Players.PlayerRemoving:Connect(function(player)
 		local entry = entryForDriver(player)
 		if entry then
 			entry.driver = nil
-			entry.input = CarDrive.idleInput()
-			CarDrive.park(entry.state)
+			entry.input = CarPhysics.idleInput()
+			CarPhysics.park(entry.state)
+			setNetworkOwner(entry.car, nil)
 			setLights(entry.car, false)
+			showInput(entry, entry.input)
 		end
+		CarService.despawnForPlayer(player)
 	end)
 
 	RunService.PreSimulation:Connect(step)
 
-	debugPrint("%d cars spawned -- %s", #entries, CarModel.describe())
+	debugPrint("%d cars spawned", #entries)
+	for _, entry in entries do
+		debugPrint("  %s", CarModel.describe(entry.car))
+	end
+end
+
+local function placeStandIn(placement: Placement): Model
+	local car = build(placement)
+	forEachPart(car, function(part)
+		part.Anchored = true
+	end)
+	car.Parent = carContainer()
+	return car
 end
 
 --[[
@@ -334,26 +387,118 @@ end
 		require(game.ServerScriptService.Server.CarService).placeInStudio()
 
 	Puts anchored stand-ins for the cars in Workspace.Cars: at CarConfig.Spawns
-	the first time, and after that rebuilt wherever they stand, so run it again
-	after changing CarConfig or the meshes. Drag a stand-in to move where its car
-	spawns, duplicate one for another car, or delete one. When the game starts,
+	the first time, and after that rebuilt wherever they stand, as whichever car
+	each one is -- so run it again after changing CarConfig or a template. Drag a
+	stand-in to move where its car spawns, or delete one. When the game starts,
 	each stand-in is swapped for a working car in the same spot.
 ]]
 function CarService.placeInStudio()
-	local origins = takeStandIns()
-	if #origins == 0 then
-		origins = defaultSpawns()
+	local placements = takeStandIns()
+	if #placements == 0 then
+		placements = defaultSpawns()
 	end
+	for _, placement in placements do
+		placeStandIn(placement)
+	end
+end
 
-	for _, origin in origins do
-		local car = CarModel.build(origin)
-		for _, descendant in car:GetDescendants() do
-			if descendant:IsA("BasePart") then
-				descendant.Anchored = true
+--[[
+	For Studio's command bar: adds a stand-in for the car `carName` (a template in
+	ServerStorage.CarModels) on the ground where the camera is looking, facing
+	away from the camera.
+
+		require(game.ServerScriptService.Server.CarService).addToStudio("Porsche")
+]]
+function CarService.addToStudio(carName: string): Model
+	local camera = Workspace.CurrentCamera
+	local focus = if camera then camera.Focus.Position else Vector3.zero
+	local look = if camera then camera.CFrame.LookVector * Vector3.new(1, 0, 1) else Vector3.zero
+	if look.Magnitude < 0.01 then
+		look = Vector3.new(0, 0, -1)
+	end
+	return placeStandIn({ car = carName, origin = CFrame.lookAt(focus, focus + look.Unit), snap = true })
+end
+
+local playerCars: { [Player]: Model } = {}
+
+function CarService.despawnForPlayer(player: Player): boolean
+	local car = playerCars[player]
+	if car then
+		playerCars[player] = nil
+		for i = #entries, 1, -1 do
+			if entries[i].car == car then
+				table.remove(entries, i)
+				break
 			end
 		end
-		car.Parent = carContainer()
+		if car.Parent then
+			car:Destroy()
+		end
+		return true
 	end
+	return false
+end
+
+function CarService.spawnForPlayer(player: Player, carId: string, customPaint: Color3?): (boolean, string, Model?)
+	CarService.despawnForPlayer(player)
+
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local spawnCFrame: CFrame
+
+	if hrp and hrp:IsA("BasePart") then
+		local look = hrp.CFrame.LookVector
+		local flatLook = Vector3.new(look.X, 0, look.Z)
+		if flatLook.Magnitude > 0.01 then
+			flatLook = flatLook.Unit
+		else
+			flatLook = Vector3.new(0, 0, -1)
+		end
+		local spawnPos = hrp.Position + flatLook * 16 + Vector3.new(0, 2, 0)
+		spawnCFrame = CFrame.lookAt(spawnPos, spawnPos + flatLook)
+	else
+		local defaultSpawn = CarConfig.Spawns[1]
+		spawnCFrame = defaultSpawn and defaultSpawn.CFrame or CFrame.new(0, 2, 40)
+	end
+
+	local car = CarService.spawnCar(carId, spawnCFrame, true, customPaint)
+	if not car then
+		return false, "Failed to build car", nil
+	end
+
+	car:SetAttribute("OwnerUserId", player.UserId)
+	playerCars[player] = car
+
+	return true, "Car spawned!", car
+end
+
+function CarService.teleportPlayerToPlay(player: Player): boolean
+	local targetCF = CarConfig.PlayingArea or CFrame.new(0, 3, 130)
+	local char = player.Character
+	if not char then
+		return false
+	end
+
+	local entry = entryForDriver(player)
+	if entry and entry.car and entry.car.PrimaryPart then
+		local rested = restOnGround(targetCF, entry.car:GetAttribute("GroundOffset") or 0)
+		-- `rested` is the car-space origin; the car's pivot is its chassis.
+		entry.car:PivotTo(rested * CFrame.new(entry.car:GetAttribute("OriginOffset") or Vector3.zero))
+		forEachPart(entry.car, function(part)
+			part.AssemblyLinearVelocity = Vector3.zero
+			part.AssemblyAngularVelocity = Vector3.zero
+		end)
+		return true
+	end
+
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if hrp and hrp:IsA("BasePart") then
+		hrp.CFrame = targetCF + Vector3.new(0, 3, 0)
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		return true
+	end
+
+	return false
 end
 
 return CarService

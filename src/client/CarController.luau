@@ -1,12 +1,12 @@
 --[[
-	CarController -- the drive script: reads the driver's input, applies it to the
-	car locally, and relays it to the server.
+	CarController -- the drive script: reads the driver's input, runs the car's
+	physics on it locally, and relays it to the server.
 
-	The local apply is what makes the car feel immediate: CarService hands the
-	driver network ownership of the car's parts, so this client's simulation is
-	the one that counts, and the constraint values written here take effect at
-	once. The relay is the safety net -- the server runs the same CarDrive maths
-	on the same input, so the car still drives if ownership has not transferred.
+	Running the physics here is what makes the car feel immediate: CarService
+	hands the driver network ownership of the car, so this client's simulation is
+	the one that counts, and the forces CarPhysics writes take effect at once. The
+	relay lets the server show everyone else which way the wheels are turned and
+	when the brake lights are on.
 
 	Seating is detected with Humanoid.Seated, the event Roblox fires on both ends
 	when a character sits down. (Watching Humanoid.SeatPart for changes is the
@@ -24,7 +24,8 @@ local RunService = game:GetService("RunService")
 
 local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
 local CarConfig = require(CarFolder.CarConfig)
-local CarDrive = require(CarFolder.CarDrive)
+local CarPhysics = require(CarFolder.CarPhysics)
+local CarVisuals = require(script.Parent.CarVisuals)
 
 local DRIVE = CarConfig.Driving
 local SEND_INTERVAL = 1 / DRIVE.InputSendRate
@@ -45,7 +46,7 @@ local axes: { [string]: number } = {
 }
 local handbrakeHeld = false
 
-local state: CarDrive.State? = nil
+local state: CarPhysics.State? = nil
 local stepConnection: RBXScriptConnection? = nil
 local inputRemote: RemoteEvent? = nil
 local sinceLastSend = 0
@@ -79,7 +80,7 @@ local function resetInput()
 	announcedDriving = false
 end
 
-local function currentInput(): CarDrive.Input
+local function currentInput(): CarPhysics.Input
 	local throttle = math.clamp(axes.throttle + axes.padThrottle - axes.brake - axes.padBrake, -1, 1)
 	local steer = math.clamp(axes.steerRight - axes.steerLeft + axes.padSteer, -1, 1)
 	return { throttle = throttle, steer = steer, handbrake = handbrakeHeld }
@@ -129,7 +130,7 @@ local function unbindControls()
 	ContextActionService:UnbindAction("CarHandbrake")
 end
 
-local function send(input: CarDrive.Input)
+local function send(input: CarPhysics.Input)
 	if inputRemote then
 		inputRemote:FireServer(input)
 	end
@@ -142,7 +143,7 @@ local function step(deltaTime: number)
 	end
 
 	local input = currentInput()
-	CarDrive.apply(active, input, deltaTime)
+	CarPhysics.apply(active, input, deltaTime)
 
 	if not announcedDriving and (math.abs(input.throttle) > 0.05 or math.abs(input.steer) > 0.05) then
 		announcedDriving = true
@@ -165,24 +166,25 @@ local function detach()
 
 	local active = state
 	if active then
-		-- Leave the car parked, in case we still own its parts on the way out.
-		CarDrive.park(active)
+		-- Stop pushing the car along, in case we still own it on the way out.
+		CarPhysics.park(active)
 		debugPrint("stopped driving %s", active.car.Name)
 	end
 
 	unbindControls()
 	resetInput()
-	send(CarDrive.idleInput())
+	send(CarPhysics.idleInput())
 
 	state = nil
+	CarVisuals.setLocalState(nil)
 end
 
 local function attach(car: Model)
 	detach()
 
-	local collected = CarDrive.collect(car)
+	local collected = CarPhysics.collect(car)
 	if not collected then
-		warn(("CarController: %s has no PrimaryPart or no drive hinges"):format(car:GetFullName()))
+		warn(("CarController: %s was not built by CarModel (no chassis forces)"):format(car:GetFullName()))
 		return
 	end
 
@@ -190,13 +192,9 @@ local function attach(car: Model)
 	sinceLastSend = 0
 	bindControls()
 	stepConnection = RunService.PreSimulation:Connect(step)
+	CarVisuals.setLocalState(collected)
 
-	debugPrint(
-		"driving %s -- %d drive hinges, %d steering hinges",
-		car.Name,
-		#collected.driveHinges,
-		#collected.steerHinges
-	)
+	debugPrint("driving %s -- %d wheels, %.1f stud wheelbase", car.Name, #collected.wheels, collected.wheelbase)
 end
 
 local function seatChanged(seat: BasePart?)
@@ -211,8 +209,8 @@ local function seatChanged(seat: BasePart?)
 	detach()
 end
 
--- The car has a roof, so a character hopping out would land inside it. Stand
--- them beside their door instead, at the spot CarModel marked on the seat.
+-- A car with a roof has nowhere to hop out to. Stand the character beside their
+-- side of the car instead, at the spot CarModel marked on the seat.
 -- This is the client's job because the character is the client's to move: a
 -- teleport from the server loses the race with the seat weld coming apart here.
 local function stepOut(seat: BasePart, humanoid: Humanoid)

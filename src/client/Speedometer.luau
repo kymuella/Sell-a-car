@@ -3,8 +3,8 @@
 	in a car, driving or riding along, and hides the moment you are back on foot.
 
 	The speed is the car's own, read off its chassis, in km/h through the same
-	studs-per-metre conversion CarConfig uses: the car's top speed on the dial is
-	CarConfig.Driving.MaxSpeed. Gear and RPM are for show -- the drivetrain has no
+	studs-per-metre conversion CarConfig uses. The dial is sized to the car you get
+	into, from its TopSpeed stat. Gear and RPM are for show -- the physics has no
 	gears -- and come from a ratio table over the dial.
 
 	Seating is detected with Humanoid.Seated, for the same reason as in
@@ -18,12 +18,14 @@ local RunService = game:GetService("RunService")
 local CarConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car"):WaitForChild("CarConfig"))
 
 local KMH_PER_STUDS_PER_SECOND = 3.6 / CarConfig.StudsPerMetre
-local TOP_SPEED_KMH = CarConfig.Driving.MaxSpeed * KMH_PER_STUDS_PER_SECOND
+
+-- The top of the dial for a car that tops out at `topSpeed` studs/s: its top
+-- speed in km/h rounded up to the next 20, so the numerals land on round numbers.
+local function dialMaxFor(topSpeed: number): number
+	return math.max(math.ceil(topSpeed * KMH_PER_STUDS_PER_SECOND / 20) * 20, 20)
+end
 
 local CONFIG = {
-	-- Top of the dial: the car's top speed rounded up to the next 20, so the
-	-- numerals land on round numbers.
-	MaxSpeed = math.ceil(TOP_SPEED_KMH / 20) * 20,
 	Unit = "KM/H",
 	Sweep = 260, -- degrees of arc
 	StartAngle = 140, -- 0 = 3 o'clock, increases clockwise
@@ -60,6 +62,8 @@ local gearText: TextLabel
 local rpmSegments: { Frame } = {}
 local rpmSegmentFrac: { number } = {}
 local rpmRedlined = false
+local numerals: { { label: TextLabel, frac: number } } = {}
+local dialMax = dialMaxFor(CarConfig.DefaultStats.TopSpeed)
 
 local car: Model? = nil
 local renderConnection: RBXScriptConnection? = nil
@@ -177,13 +181,14 @@ local function build()
 				Position = UDim2.fromScale(0.5 + math.cos(rad) * r * 0.5, 0.5 + math.sin(rad) * r * 0.5),
 				Size = UDim2.fromScale(0.16, 0.09),
 				FontFace = fontBlack,
-				Text = tostring(math.round(frac * CONFIG.MaxSpeed)),
+				Text = tostring(math.round(frac * dialMax)),
 				TextScaled = true,
 				TextColor3 = red and COLOR.Accent or COLOR.Ink,
 				TextXAlignment = Enum.TextXAlignment.Center,
 				ZIndex = 4,
 			})
 			new("UITextSizeConstraint", { MaxTextSize = 22, Parent = n })
+			table.insert(numerals, { label = n, frac = frac })
 		end
 	end
 
@@ -283,10 +288,10 @@ local function render(dt: number)
 	end
 
 	local speed, reversing = carSpeed(chassis)
-	local target = math.clamp(speed, 0, CONFIG.MaxSpeed)
+	local target = math.clamp(speed, 0, dialMax)
 	shown += (target - shown) * math.min(1, dt * 7) -- needle damping
 
-	local frac = shown / CONFIG.MaxSpeed
+	local frac = shown / dialMax
 	needle.Rotation = CONFIG.StartAngle + frac * CONFIG.Sweep
 	local rad = math.rad(needle.Rotation)
 	local mid = 1.02 - 0.22 * 0.5
@@ -339,6 +344,13 @@ end
 
 local function show(newCar: Model)
 	car = newCar
+
+	local topSpeed = newCar:GetAttribute("TopSpeed")
+	dialMax = dialMaxFor(if typeof(topSpeed) == "number" then topSpeed else CarConfig.DefaultStats.TopSpeed)
+	for _, numeral in numerals do
+		numeral.label.Text = tostring(math.round(numeral.frac * dialMax))
+	end
+
 	-- sweep up from rest every time you get in
 	shown = 0
 	shownRpm = 900
