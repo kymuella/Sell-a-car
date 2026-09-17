@@ -148,12 +148,13 @@ CarConfig.Driving = {
 	InputSendRate = 20, -- times/second the driver relays input to the server
 }
 
-local RIDE_HEIGHT = CarConfig.Dimensions.WheelRadius + 0.2
-
--- Where CarService puts a car on startup, as the car-space origin.
+-- Where cars go when Workspace.Cars has no stand-ins placed in Studio (see
+-- CarService.placeInStudio), as the car-space origin. Each one is dropped onto
+-- the floor under it, so the height only has to be roughly right. These are the
+-- middle two display pads in the dealership.
 CarConfig.Spawns = {
-	CFrame.new(-8, RIDE_HEIGHT, 0),
-	CFrame.new(8, RIDE_HEIGHT, 0),
+	CFrame.new(-15, 2, 80),
+	CFrame.new(15, 2, 80),
 }
 
 CarConfig.Reset = {

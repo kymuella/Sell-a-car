@@ -24,6 +24,9 @@ local CarModel = require(CarFolder.CarModel)
 
 local RESET = CarConfig.Reset
 
+local GROUND_PROBE_ABOVE = 10
+local GROUND_PROBE_DEPTH = 200
+
 local CarService = {}
 
 type Entry = {
@@ -181,6 +184,45 @@ local function carContainer(): Folder
 	return folder
 end
 
+-- Drops a spawn point onto whatever floor is under it, so a car never starts
+-- with its wheels inside the map. The ray starts only a little above the point,
+-- which keeps it beneath any roof over the spawn, and passes through parts a car
+-- would fall through (the dealership's display pads, for one).
+local function restOnGround(origin: CFrame): CFrame
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { carContainer() }
+	params.RespectCanCollide = true
+
+	local from = origin.Position + Vector3.new(0, GROUND_PROBE_ABOVE, 0)
+	local hit = Workspace:Raycast(from, Vector3.new(0, -GROUND_PROBE_DEPTH, 0), params)
+	if not hit then
+		return origin
+	end
+	return origin.Rotation + hit.Position + Vector3.new(0, CarConfig.Dimensions.WheelRadius + 0.2, 0)
+end
+
+-- Cars left in Workspace.Cars from Studio (see placeInStudio) are stand-ins
+-- marking where cars go. Takes them out and returns where each one stood.
+local function takeStandIns(): { CFrame }
+	local origins = {}
+	for _, standIn in carContainer():GetChildren() do
+		if standIn:IsA("Model") and standIn:GetAttribute("DriveableCar") and standIn.PrimaryPart then
+			table.insert(origins, CarModel.originOf(standIn))
+			standIn:Destroy()
+		end
+	end
+	return origins
+end
+
+local function defaultSpawns(): { CFrame }
+	local origins = {}
+	for _, spawn in CarConfig.Spawns do
+		table.insert(origins, restOnGround(spawn))
+	end
+	return origins
+end
+
 --[[
 	Builds a car at `pivot` (its car-space origin) and wires up its seats.
 ]]
@@ -263,8 +305,12 @@ function CarService.start()
 	inputRemote.Parent = ReplicatedStorage
 	inputRemote.OnServerEvent:Connect(onInputReceived)
 
-	for _, pivot in CarConfig.Spawns do
-		CarService.spawnCar(pivot)
+	local origins = takeStandIns()
+	if #origins == 0 then
+		origins = defaultSpawns()
+	end
+	for _, origin in origins do
+		CarService.spawnCar(origin)
 	end
 
 	Players.PlayerRemoving:Connect(function(player)
@@ -280,6 +326,34 @@ function CarService.start()
 	RunService.PreSimulation:Connect(step)
 
 	debugPrint("%d cars spawned -- %s", #entries, CarModel.describe())
+end
+
+--[[
+	For Studio's command bar in edit mode, so the cars show while you build:
+
+		require(game.ServerScriptService.Server.CarService).placeInStudio()
+
+	Puts anchored stand-ins for the cars in Workspace.Cars: at CarConfig.Spawns
+	the first time, and after that rebuilt wherever they stand, so run it again
+	after changing CarConfig or the meshes. Drag a stand-in to move where its car
+	spawns, duplicate one for another car, or delete one. When the game starts,
+	each stand-in is swapped for a working car in the same spot.
+]]
+function CarService.placeInStudio()
+	local origins = takeStandIns()
+	if #origins == 0 then
+		origins = defaultSpawns()
+	end
+
+	for _, origin in origins do
+		local car = CarModel.build(origin)
+		for _, descendant in car:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				descendant.Anchored = true
+			end
+		end
+		car.Parent = carContainer()
+	end
 end
 
 return CarService

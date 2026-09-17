@@ -35,6 +35,22 @@ Roblox character's head goes through a 911's roof.
 While you sit in a car, driving or riding along, a speedometer shows the car's
 speed in km/h (`R` when reversing). It hides as soon as you are on foot.
 
+### Seeing the cars in Studio
+
+The cars are built when the game starts, so to see them while editing, run this
+in the command bar:
+
+```lua
+require(game.ServerScriptService.Server.CarService).placeInStudio()
+```
+
+It puts stand-ins in `Workspace.Cars` -- on the dealership's middle display
+pads (`CarConfig.Spawns`) the first time, and after that rebuilt wherever they
+stand. Drag one to move where that car spawns, duplicate one for another car,
+or delete one. When the game starts, each stand-in is swapped for a working car
+in the same spot. Run the command again after changing `CarConfig` or the
+meshes so the stand-ins keep up.
+
 ### Controls
 
 | Input | Keyboard | Gamepad |

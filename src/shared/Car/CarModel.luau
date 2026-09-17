@@ -61,6 +61,9 @@ local INTERIOR_WIDTH = DIM.Width - DIM.SillWidth * 2
 local FLOOR_THICKNESS = scaled(0.12)
 local ROOF_THICKNESS = scaled(0.1)
 
+-- Where the floor pan, the PrimaryPart, sits in car space.
+local CHASSIS_OFFSET = Vector3.new(0, FLOOR_Y - FLOOR_THICKNESS / 2, CABIN_MID_Z)
+
 -- A hinge turns about its attachments' X axis.
 local AXLE_AXIS = CFrame.identity -- X stays on car +X: the axis wheels spin about
 local STEER_AXIS = CFrame.Angles(0, 0, math.pi / 2) -- X rotated onto car +Y: the axis the knuckles turn about
@@ -441,11 +444,10 @@ function CarModel.build(base: CFrame): Model
 
 	-- The floor pan. Central and low, so it makes a good PrimaryPart: its
 	-- LookVector is the car's forward and its CFrame is the model's pivot.
-	local chassisOffset = Vector3.new(0, FLOOR_Y - FLOOR_THICKNESS / 2, CABIN_MID_Z)
 	local chassis = newPart({
 		Name = "Chassis",
 		Size = Vector3.new(INTERIOR_WIDTH, FLOOR_THICKNESS, CABIN_LENGTH),
-		Offset = chassisOffset,
+		Offset = CHASSIS_OFFSET,
 		Transparency = 1,
 		CanCollide = true,
 		Massless = false,
@@ -520,7 +522,7 @@ function CarModel.build(base: CFrame): Model
 
 	local corners: { [string]: Corner } = {}
 	for _, layout in WHEELS do
-		corners[layout.Key] = buildWheel(base, chassis, chassisOffset, layout, wheels)
+		corners[layout.Key] = buildWheel(base, chassis, CHASSIS_OFFSET, layout, wheels)
 	end
 
 	buildSeat(base, chassis, car, true)
@@ -530,6 +532,15 @@ function CarModel.build(base: CFrame): Model
 
 	car:SetAttribute("DriveableCar", true)
 	return car
+end
+
+--[[
+	The car-space origin of a car made by build, wherever it has been moved to
+	since -- the `base` that would build it again in the same spot.
+]]
+function CarModel.originOf(car: Model): CFrame
+	assert(car.PrimaryPart, "CarModel.originOf: the car has no PrimaryPart")
+	return car.PrimaryPart.CFrame * CFrame.new(-CHASSIS_OFFSET)
 end
 
 --[[
