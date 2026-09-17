@@ -32,6 +32,12 @@ local CONFIG = {
 	RedlineFrac = 0.85,
 	GearTops = { 0.19, 0.32, 0.46, 0.62, 0.80, 1.00 },
 	ReverseSpeed = CarConfig.Driving.BrakeSpeedThreshold, -- studs/s backwards before it shows R
+
+	-- The rev counter: an arc around the outside of the dial, over the same sweep.
+	RpmMax = 8000,
+	RpmRedline = 7000, -- the whole arc turns red above this
+	RpmLimiterFrac = 0.78, -- where the limiter mark sits on the arc
+	RpmSegmentCount = 110,
 }
 
 local COLOR = {
@@ -51,7 +57,9 @@ local segments: { Frame } = {}
 local segmentFrac: { number } = {}
 local speedText: TextLabel
 local gearText: TextLabel
-local rpmFill: Frame
+local rpmSegments: { Frame } = {}
+local rpmSegmentFrac: { number } = {}
+local rpmRedlined = false
 
 local car: Model? = nil
 local renderConnection: RBXScriptConnection? = nil
@@ -84,7 +92,7 @@ local function radialBar(
 	transparency: number,
 	z: number
 ): Frame
-	-- a thin bar whose *inner* edge sits at `radius` (fraction of half-width), rotated around the dial centre
+	-- a thin bar whose *outer* edge sits at `radius` (fraction of half-width), rotated around the dial centre
 	local rad = math.rad(angleDeg)
 	local mid = radius - length * 0.5
 	return new("Frame", {
@@ -127,11 +135,12 @@ local function build()
 		Parent = Players.LocalPlayer:WaitForChild("PlayerGui"),
 	})
 
-	-- square dial container, bottom-centre like NFS 2015
+	-- square dial container, bottom-right; the margin leaves room for the rev arc,
+	-- which reaches a little outside the square
 	local dial = new("Frame", {
 		Name = "Dial",
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -24),
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -40, 1, -40),
 		Size = UDim2.fromScale(0.34, 0.34),
 		BackgroundTransparency = 1,
 		Parent = gui,
@@ -231,32 +240,29 @@ local function build()
 		LayoutOrder = 3,
 	})
 
-	-- rpm bar, under the dial
-	local rpmWrap = new("Frame", {
-		Name = "RPM",
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -8),
-		Size = UDim2.new(0.34, 0, 0, 10),
-		BackgroundColor3 = COLOR.Rule,
-		BorderSizePixel = 0,
-		Parent = gui,
-	})
-	rpmFill = new("Frame", {
-		Name = "Fill",
-		Size = UDim2.fromScale(0, 1),
-		BackgroundColor3 = COLOR.Ink,
-		BorderSizePixel = 0,
-		Parent = rpmWrap,
-	})
-	new("Frame", {
-		Name = "Limiter",
-		Position = UDim2.fromScale(0.78, 0),
-		Size = UDim2.new(0, 2, 1, 0),
-		BackgroundColor3 = COLOR.Accent,
-		BorderSizePixel = 0,
-		ZIndex = 2,
-		Parent = rpmWrap,
-	})
+	-- rev counter: a track and a fill arc on the outer ring, clear of the needle tip
+	local rpm = new("Folder", { Name = "RPM", Parent = dial })
+	for i = 0, CONFIG.RpmSegmentCount - 1 do
+		local frac = (i + 0.5) / CONFIG.RpmSegmentCount
+		local angle = CONFIG.StartAngle + frac * CONFIG.Sweep
+		local track = radialBar(rpm, angle, 1.12, 0.05, 0.012, COLOR.Rule, 0, 1)
+		track.Name = "Track"
+		local seg = radialBar(rpm, angle, 1.12, 0.05, 0.028, COLOR.Ink, 1, 2)
+		seg.Name = "Seg"
+		rpmSegments[#rpmSegments + 1] = seg
+		rpmSegmentFrac[#rpmSegmentFrac + 1] = frac
+	end
+	local limiter = radialBar(
+		rpm,
+		CONFIG.StartAngle + CONFIG.RpmLimiterFrac * CONFIG.Sweep,
+		1.15,
+		0.11,
+		0.008,
+		COLOR.Accent,
+		0,
+		3
+	)
+	limiter.Name = "Limiter"
 end
 
 local hide: () -> ()
@@ -303,13 +309,23 @@ local function render(dt: number)
 	if reversing then
 		gearFrac = math.min(frac / CONFIG.GearTops[1], 1)
 	end
-	local rpm = math.clamp(1300 + gearFrac * 6500, 820, 8000)
+	local rpm = math.clamp(1300 + gearFrac * 6500, 820, CONFIG.RpmMax)
 	shownRpm += (rpm - shownRpm) * math.min(1, dt * 9)
 
 	speedText.Text = tostring(math.round(shown))
 	gearText.Text = if reversing then "GEAR R" else "GEAR " .. gear
-	rpmFill.Size = UDim2.fromScale(shownRpm / 8000, 1)
-	rpmFill.BackgroundColor3 = shownRpm > 7000 and COLOR.Accent or COLOR.Ink
+
+	local rpmFrac = shownRpm / CONFIG.RpmMax
+	for i, seg in rpmSegments do
+		seg.BackgroundTransparency = rpmSegmentFrac[i] <= rpmFrac and 0 or 1
+	end
+	local redlined = shownRpm > CONFIG.RpmRedline
+	if redlined ~= rpmRedlined then
+		rpmRedlined = redlined
+		for _, seg in rpmSegments do
+			seg.BackgroundColor3 = if redlined then COLOR.Accent else COLOR.Ink
+		end
+	end
 end
 
 function hide()
