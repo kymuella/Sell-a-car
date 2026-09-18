@@ -2,11 +2,16 @@
 	GameUI -- Main Client UI Controller.
 	Features:
 	- Non-overlapping layout: Cash counter integrated into Left Navigation Dock (safe from Roblox topbar/chat/mic)
-	- Robux-Only Shop: Developer Products (Cash Packs) & Gamepasses (2x Cash, VIP, Nitro)
+	- Robux-Only Shop: Developer Products (Cash Packs) & Gamepasses (2x Cash, VIP, Nitro).
+	  The shop only asks for a Roblox purchase prompt -- what a player buys is
+	  granted server-side, so nothing here can hand out cash or passes.
 	- Garage with Dual Tabs: "MY CARS" (spawn/customize) & "DEALERSHIP" (buy cars with in-game Cash)
 	- Cardex Compendium: Discovered cars vs blacked-out mystery silhouettes with direct Dealership links
 	- Play Teleport: Cinematic fade transition to the driving area
 	- Restoration Bay: delivered barn finds counting down through retrieval and recuperation
+	- Trading: a full trade window -- who is in the server, both offers side by side,
+	  and the two confirmations -- plus the on-screen prompt an incoming request
+	  arrives on. TradingService owns every trade; this only shows it and asks.
 	- Responsive design with smooth tweens and toast notifications
 ]]
 
@@ -18,8 +23,11 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
+local SharedFolder = ReplicatedStorage:WaitForChild("Shared")
+local CarFolder = SharedFolder:WaitForChild("Car")
 local CarCatalog = require(CarFolder.CarCatalog)
+local Monetization = require(SharedFolder.Monetization)
+local Trading = require(SharedFolder.Trading)
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -57,19 +65,6 @@ local PAINT_PRESETS = {
 	{ Name = "Sunset Orange", Color = Color3.fromRGB(234, 88, 12) },
 }
 
-local ROBUX_ITEMS = {
-	CashPacks = {
-		{ Id = "cash_small", Name = "Small Cash Stash", Cash = 50000, Robux = 49, Icon = "💵", Desc = "Quick boost to start your collection" },
-		{ Id = "cash_medium", Name = "High Roller Bag", Cash = 200000, Robux = 149, Icon = "💼", Desc = "Instantly afford top sport supercars" },
-		{ Id = "cash_large", Name = "Billionaire Vault", Cash = 1000000, Robux = 499, Icon = "🏦", Desc = "Unlimited luxury and full garage freedom" },
-	},
-	Passes = {
-		{ Id = "pass_2xcash", Name = "2x Cash Multiplier", Robux = 249, Icon = "⚡", Desc = "Permanently double all playtime and driving income" },
-		{ Id = "pass_vip", Name = "VIP Elite Pass", Robux = 399, Icon = "👑", Desc = "Golden drift smoke, VIP title, and garage perks" },
-		{ Id = "pass_nitro", Name = "Nitro Turbo Boost", Robux = 199, Icon = "🚀", Desc = "Adds instant rocket nitrous boost to every car" },
-	}
-}
-
 -- Client State
 local localData = {
 	Cash = 0,
@@ -81,6 +76,7 @@ local localData = {
 	IsVIP = false,
 	HasNitro = false,
 	Restorations = {},
+	CarOrigins = {},
 }
 
 local selectedGarageCarId = "Porsche"
@@ -89,16 +85,26 @@ local garageCurrentTab = "GARAGE" -- "GARAGE" or "DEALERSHIP"
 local robuxShopCurrentTab = "CASH" -- "CASH" or "PASSES"
 local cardexFilter = "ALL"
 
+-- The trade we are in, as the server last described it, and the request waiting
+-- to be answered. Both are nil most of the time.
+local tradeSession: Trading.Session? = nil
+local tradeInvite: any = nil
+
 -- Remotes
 local remotesFolder: Folder? = nil
 local syncRemote: RemoteEvent? = nil
 local buyRemote: RemoteFunction? = nil
-local buyRobuxRemote: RemoteFunction? = nil
+local promptPurchaseRemote: RemoteEvent? = nil
 local spawnRemote: RemoteFunction? = nil
 local despawnRemote: RemoteFunction? = nil
 local teleportRemote: RemoteFunction? = nil
 local getDataRemote: RemoteFunction? = nil
 local notifyRemote: RemoteEvent? = nil
+local tradeRequestRemote: RemoteFunction? = nil
+local tradeRespondRemote: RemoteFunction? = nil
+local tradeActionRemote: RemoteFunction? = nil
+local tradeInviteRemote: RemoteEvent? = nil
+local tradeStateRemote: RemoteEvent? = nil
 
 -- GUI References
 local screenGui: ScreenGui
@@ -118,6 +124,14 @@ local cardexCountText: TextLabel
 local cardexProgressBar: Frame
 local shopContentContainer: ScrollingFrame
 local garageBodyFrame: Frame
+local tradeModal: Frame
+local tradeBodyFrame: Frame
+local tradeInviteFrame: Frame
+local tradeInviteAvatar: ImageLabel
+local tradeInviteName: TextLabel
+local tradeInviteId: TextLabel
+local tradeInviteTimer: TextLabel
+local tradeInviteFill: Frame
 
 -- Helper for creating GUI elements
 local function make(className: string, props: { [string]: any }): any
@@ -187,6 +201,34 @@ local function formatCash(amount: number): string
 	return "$" .. formatted
 end
 
+--[[
+	One line saying who first owned a car, and how many times it has changed
+	hands, from a PlayerData.CarOrigins record or a trade offer entry.
+]]
+local function originLine(origin: any): (string, Color3)
+	if typeof(origin) ~= "table" or typeof(origin.OriginalUserId) ~= "number" then
+		return "Original owner not recorded", THEME.TextMuted
+	end
+
+	local trades = if typeof(origin.Trades) == "number" then origin.Trades else 0
+	local who = if typeof(origin.OriginalUserName) == "string" then origin.OriginalUserName else "someone"
+	if origin.OriginalUserId == player.UserId then
+		who = "you"
+	end
+
+	if trades == 0 then
+		return string.format("⭐ Original owner: %s (ID %d)", who, origin.OriginalUserId), THEME.Gold
+	end
+	return string.format(
+		"↔ Originally %s (ID %d) • %d trade%s",
+		who,
+		origin.OriginalUserId,
+		trades,
+		if trades == 1 then "" else "s"
+	),
+		THEME.Accent
+end
+
 local function updateHUD()
 	if dockCashLabel then
 		dockCashLabel.Text = formatCash(localData.Cash)
@@ -229,6 +271,7 @@ end
 local renderCardexContent: () -> ()
 local renderRobuxShopContent: () -> ()
 local renderGarageContent: () -> ()
+local renderTradeContent: () -> ()
 
 local function openModal(targetModal: Frame)
 	if currentModal == targetModal then
@@ -256,6 +299,8 @@ local function openModal(targetModal: Frame)
 		renderRobuxShopContent()
 	elseif targetModal == garageModal then
 		renderGarageContent()
+	elseif targetModal == tradeModal then
+		renderTradeContent()
 	end
 end
 
@@ -554,6 +599,58 @@ function renderCardexContent()
 	end
 end
 
+-- Robux prices are set on the Roblox listing, so the number in Monetization is
+-- just what we show until the real one arrives.
+local priceCache: { [number]: number } = {}
+
+--[[
+	Puts `item`'s price on its buy button, or marks the card unavailable while
+	the item still has a placeholder id.
+]]
+local function showPrice(button: TextButton, item: any, infoType: Enum.InfoType)
+	local assetId = Monetization.assetIdOf(item)
+
+	if not Monetization.isConfigured(assetId) then
+		button.Text = "UNAVAILABLE"
+		button.BackgroundColor3 = THEME.BgCardHover
+		button.TextColor3 = THEME.TextMuted
+		return
+	end
+
+	button.Text = string.format("R$ %d", priceCache[assetId] or item.Robux)
+	if priceCache[assetId] then
+		return
+	end
+
+	task.spawn(function()
+		local ok, info = pcall(function()
+			return MarketplaceService:GetProductInfo(assetId, infoType)
+		end)
+		if ok and typeof(info) == "table" and typeof(info.PriceInRobux) == "number" then
+			priceCache[assetId] = info.PriceInRobux
+			if button.Parent then
+				button.Text = string.format("R$ %d", info.PriceInRobux)
+			end
+		end
+	end)
+end
+
+--[[
+	Asks the server to open Roblox's purchase dialog. Whatever the player buys is
+	granted from the MarketplaceService receipt on the server, never from here,
+	so the shop just waits for the data sync to come back.
+]]
+local function requestPurchase(item: any)
+	if not Monetization.isConfigured(Monetization.assetIdOf(item)) then
+		showToast(string.format("%s is not on sale yet.", item.Name), true)
+		return
+	end
+
+	if promptPurchaseRemote then
+		promptPurchaseRemote:FireServer(item.Key)
+	end
+end
+
 -- Robux-Only Shop Content Renderer
 function renderRobuxShopContent()
 	if not shopContentContainer then
@@ -569,9 +666,9 @@ function renderRobuxShopContent()
 	})
 
 	if robuxShopCurrentTab == "CASH" then
-		for i, item in ROBUX_ITEMS.CashPacks do
+		for i, item in Monetization.Products do
 			local card = make("Frame", {
-				Name = item.Id,
+				Name = item.Key,
 				BackgroundColor3 = THEME.BgCard,
 				BorderSizePixel = 0,
 				LayoutOrder = i,
@@ -641,36 +738,25 @@ function renderRobuxShopContent()
 				Size = UDim2.new(1, -24, 0, 32),
 				BackgroundColor3 = THEME.RobuxGreen,
 				FontFace = Font.fromEnum(Enum.Font.GothamBold),
-				Text = string.format("R$ %d", item.Robux),
 				TextColor3 = Color3.fromRGB(255, 255, 255),
 				TextSize = 13,
 				BorderSizePixel = 0,
 				Parent = card,
 			})
 			addCorner(buyBtn, 6)
+			showPrice(buyBtn, item, Enum.InfoType.Product)
 
 			buyBtn.MouseButton1Click:Connect(function()
-				if buyRobuxRemote then
-					buyBtn.Text = "Processing..."
-					local ok, msg = buyRobuxRemote:InvokeServer(item.Id)
-					if ok then
-						showToast("🎉 " .. msg, false)
-						updateHUD()
-					else
-						showToast(msg or "Purchase failed", true)
-					end
-					buyBtn.Text = string.format("R$ %d", item.Robux)
-				end
+				requestPurchase(item)
 			end)
 		end
 	else
-		for i, item in ROBUX_ITEMS.Passes do
-			local isOwned = (item.Id == "pass_2xcash" and localData.Has2xCash)
-				or (item.Id == "pass_vip" and localData.IsVIP)
-				or (item.Id == "pass_nitro" and localData.HasNitro)
+		for i, item in Monetization.Passes do
+			-- Set server-side from UserOwnsGamePassAsync, never by this client.
+			local isOwned = (localData :: any)[item.Flag] == true
 
 			local card = make("Frame", {
-				Name = item.Id,
+				Name = item.Key,
 				BackgroundColor3 = THEME.BgCard,
 				BorderSizePixel = 0,
 				LayoutOrder = i,
@@ -752,22 +838,11 @@ function renderRobuxShopContent()
 				buyBtn.AutoButtonColor = false
 			else
 				buyBtn.BackgroundColor3 = THEME.RobuxGreen
-				buyBtn.Text = string.format("R$ %d", item.Robux)
 				buyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+				showPrice(buyBtn, item, Enum.InfoType.GamePass)
 
 				buyBtn.MouseButton1Click:Connect(function()
-					if buyRobuxRemote then
-						buyBtn.Text = "Processing..."
-						local ok, msg = buyRobuxRemote:InvokeServer(item.Id)
-						if ok then
-							showToast("🎉 " .. msg, false)
-							renderRobuxShopContent()
-							updateHUD()
-						else
-							showToast(msg or "Purchase failed", true)
-							buyBtn.Text = string.format("R$ %d", item.Robux)
-						end
-					end
+					requestPurchase(item)
 				end)
 			end
 		end
@@ -1037,9 +1112,24 @@ function renderGarageContent()
 			Parent = detailContainer,
 		})
 
+		-- The car's papers: the same line its nameplate carries in the world.
+		local ownershipText, ownershipColor = originLine((localData.CarOrigins or {})[currentCar.Id])
+		make("TextLabel", {
+			Position = UDim2.new(0, 16, 0, 60),
+			Size = UDim2.new(1, -32, 0, 14),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+			Text = ownershipText,
+			TextColor3 = ownershipColor,
+			TextSize = 11,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = detailContainer,
+		})
+
 		local specBox = make("Frame", {
-			Position = UDim2.new(0, 16, 0, 68),
-			Size = UDim2.new(1, -32, 0, 88),
+			Position = UDim2.new(0, 16, 0, 78),
+			Size = UDim2.new(1, -32, 0, 84),
 			BackgroundColor3 = Color3.fromRGB(18, 22, 30),
 			BorderSizePixel = 0,
 			Parent = detailContainer,
@@ -1352,6 +1442,737 @@ function renderGarageContent()
 	end
 end
 
+-- Trading: the trade window, and the prompt an incoming request arrives on.
+
+-- Everything asked of TradingService goes through here and comes back as
+-- (ok, message). A refusal is worth a toast; a change that worked shows itself
+-- in the panel a moment later, so only the decisive ones say so.
+local function tradeAction(action: string, carId: string?)
+	if not tradeActionRemote then
+		return
+	end
+	local ok, message = tradeActionRemote:InvokeServer(action, carId)
+	if not ok then
+		showToast(if typeof(message) == "string" then message else "That did not work", true)
+	elseif (action == "confirm" or action == "cancel") and typeof(message) == "string" then
+		showToast(message, false)
+	end
+end
+
+local function offerValue(offer: { Trading.OfferedCar }): number
+	local total = 0
+	for _, entry in offer do
+		local car = CarCatalog.get(entry.CarId)
+		if car then
+			total += car.Price
+		end
+	end
+	return total
+end
+
+-- Who a side of the trade is, player id included: the same identity the
+-- nameplate on their cars carries.
+local function identityStrip(parent: Frame, side: Trading.Side)
+	local avatar = make("ImageLabel", {
+		Position = UDim2.new(0, 14, 0, 40),
+		Size = UDim2.new(0, 30, 0, 30),
+		BackgroundColor3 = THEME.BgLocked,
+		BorderSizePixel = 0,
+		Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48", side.UserId),
+		Parent = parent,
+	})
+	addCorner(avatar, 15)
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 52, 0, 40),
+		Size = UDim2.new(1, -66, 0, 16),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = side.DisplayName,
+		TextColor3 = THEME.TextPrimary,
+		TextSize = 12,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = parent,
+	})
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 52, 0, 56),
+		Size = UDim2.new(1, -66, 0, 14),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = string.format("@%s • PLAYER ID %d", side.Name, side.UserId),
+		TextColor3 = THEME.TextMuted,
+		TextSize = 10,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = parent,
+	})
+end
+
+-- A car on the table. `onRemove` makes the card clickable to take it back; the
+-- other side passes nil, so theirs only reads.
+local function tradeOfferCard(parent: Instance, entry: Trading.OfferedCar, order: number, onRemove: (() -> ())?)
+	local car = CarCatalog.get(entry.CarId)
+	local accent = if car then car.AccentColor else THEME.TextMuted
+	local nameInset = if onRemove then 62 else 30
+
+	local card = make("TextButton", {
+		Size = UDim2.new(1, -4, 0, 58),
+		BackgroundColor3 = THEME.BgCardHover,
+		BorderSizePixel = 0,
+		Text = "",
+		AutoButtonColor = onRemove ~= nil,
+		LayoutOrder = order,
+		Parent = parent,
+	})
+	addCorner(card, 8)
+	addStroke(card, accent, 0.5)
+
+	local stripe = make("Frame", {
+		Position = UDim2.new(0, 7, 0.5, -19),
+		Size = UDim2.new(0, 5, 0, 38),
+		BackgroundColor3 = accent,
+		BorderSizePixel = 0,
+		Parent = card,
+	})
+	addCorner(stripe, 3)
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 20, 0, 7),
+		Size = UDim2.new(1, -nameInset, 0, 16),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = if car then car.DisplayName else entry.CarId,
+		TextColor3 = THEME.TextPrimary,
+		TextSize = 12,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card,
+	})
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 20, 0, 24),
+		Size = UDim2.new(1, -nameInset, 0, 14),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = if car
+			then string.format("%s • %d MPH • %s", car.Tier, math.round(car.TopSpeed * 2), formatCash(car.Price))
+			else "Unknown vehicle",
+		TextColor3 = THEME.TextSecondary,
+		TextSize = 10,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card,
+	})
+
+	local historyText, historyColor = originLine(entry)
+	make("TextLabel", {
+		Position = UDim2.new(0, 20, 0, 39),
+		Size = UDim2.new(1, -nameInset, 0, 14),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = historyText,
+		TextColor3 = historyColor,
+		TextSize = 10,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card,
+	})
+
+	if onRemove then
+		local remove = make("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -8, 0.5, 0),
+			Size = UDim2.new(0, 34, 0, 28),
+			BackgroundColor3 = Color3.fromRGB(48, 24, 26),
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = "✕",
+			TextColor3 = THEME.Red,
+			TextSize = 13,
+			BorderSizePixel = 0,
+			Parent = card,
+		})
+		addCorner(remove, 6)
+		remove.MouseButton1Click:Connect(onRemove)
+		card.MouseButton1Click:Connect(onRemove)
+	end
+end
+
+-- One of your cars you have not put up yet.
+local function tradeGarageRow(parent: Instance, car: CarCatalog.CarEntry, order: number)
+	local row = make("TextButton", {
+		Size = UDim2.new(1, -4, 0, 42),
+		BackgroundColor3 = THEME.BgLocked,
+		BorderSizePixel = 0,
+		Text = "",
+		LayoutOrder = order,
+		Parent = parent,
+	})
+	addCorner(row, 6)
+	addStroke(row, THEME.Stroke, THEME.StrokeTrans)
+
+	local dot = make("Frame", {
+		Position = UDim2.new(0, 10, 0.5, -6),
+		Size = UDim2.new(0, 12, 0, 12),
+		BackgroundColor3 = car.AccentColor,
+		BorderSizePixel = 0,
+		Parent = row,
+	})
+	addCorner(dot, 6)
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 30, 0, 5),
+		Size = UDim2.new(1, -110, 0, 16),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = car.DisplayName,
+		TextColor3 = THEME.TextPrimary,
+		TextSize = 12,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = row,
+	})
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 30, 0, 21),
+		Size = UDim2.new(1, -110, 0, 14),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = string.format("%s • %s", car.Tier, formatCash(car.Price)),
+		TextColor3 = THEME.TextMuted,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = row,
+	})
+
+	local add = make("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -8, 0.5, 0),
+		Size = UDim2.new(0, 72, 0, 26),
+		BackgroundColor3 = THEME.Accent,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "＋ OFFER",
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		TextSize = 10,
+		BorderSizePixel = 0,
+		Parent = row,
+	})
+	addCorner(add, 6)
+
+	local function offer()
+		tradeAction("offer", car.Id)
+	end
+	add.MouseButton1Click:Connect(offer)
+	row.MouseButton1Click:Connect(offer)
+end
+
+local function emptyNote(parent: Instance, text: string, order: number)
+	make("TextLabel", {
+		Size = UDim2.new(1, -4, 0, 54),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = text,
+		TextColor3 = THEME.TextMuted,
+		TextSize = 11,
+		TextWrapped = true,
+		LayoutOrder = order,
+		Parent = parent,
+	})
+end
+
+-- No trade open: everyone else in the server, and a button to invite them.
+local function renderTraderPicker()
+	make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "PLAYERS IN THIS SERVER",
+		TextColor3 = THEME.TextSecondary,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = tradeBodyFrame,
+	})
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 0, 0, 20),
+		Size = UDim2.new(1, 0, 0, 32),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = string.format(
+			"Invite someone to open a trade window. Each side can put up to %d vehicles on the table, and both have to confirm before anything moves. Starter vehicles cannot be traded, and neither of you can receive a car you already own.",
+			Trading.MaxOffer
+		),
+		TextColor3 = THEME.TextMuted,
+		TextSize = 11,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Parent = tradeBodyFrame,
+	})
+
+	local list = make("ScrollingFrame", {
+		Position = UDim2.new(0, 0, 0, 62),
+		Size = UDim2.new(1, 0, 1, -62),
+		BackgroundTransparency = 1,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 6,
+		ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
+		BorderSizePixel = 0,
+		Parent = tradeBodyFrame,
+	})
+	make("UIListLayout", {
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = list,
+	})
+
+	local others = {}
+	for _, other in Players:GetPlayers() do
+		if other ~= player then
+			table.insert(others, other)
+		end
+	end
+
+	if #others == 0 then
+		emptyNote(list, "Nobody else is in this server yet.\nTrading needs a second player.", 1)
+		return
+	end
+
+	for i, other in others do
+		local row = make("Frame", {
+			Size = UDim2.new(1, -4, 0, 62),
+			BackgroundColor3 = THEME.BgCard,
+			BorderSizePixel = 0,
+			LayoutOrder = i,
+			Parent = list,
+		})
+		addCorner(row, 8)
+		addStroke(row, THEME.Stroke, THEME.StrokeTrans)
+
+		local avatar = make("ImageLabel", {
+			Position = UDim2.new(0, 12, 0.5, -20),
+			Size = UDim2.new(0, 40, 0, 40),
+			BackgroundColor3 = THEME.BgLocked,
+			BorderSizePixel = 0,
+			Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48", other.UserId),
+			Parent = row,
+		})
+		addCorner(avatar, 20)
+
+		make("TextLabel", {
+			Position = UDim2.new(0, 62, 0, 12),
+			Size = UDim2.new(1, -200, 0, 18),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = other.DisplayName,
+			TextColor3 = THEME.TextPrimary,
+			TextSize = 13,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		make("TextLabel", {
+			Position = UDim2.new(0, 62, 0, 32),
+			Size = UDim2.new(1, -200, 0, 16),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+			Text = string.format("@%s • PLAYER ID %d", other.Name, other.UserId),
+			TextColor3 = THEME.TextMuted,
+			TextSize = 11,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+
+		local invite = make("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -12, 0.5, 0),
+			Size = UDim2.new(0, 128, 0, 32),
+			BackgroundColor3 = THEME.Accent,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = "🤝 INVITE TO TRADE",
+			TextColor3 = Color3.fromRGB(255, 255, 255),
+			TextSize = 11,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
+		addCorner(invite, 6)
+
+		invite.MouseButton1Click:Connect(function()
+			if not tradeRequestRemote then
+				return
+			end
+			invite.Text = "SENDING..."
+			local ok, message = tradeRequestRemote:InvokeServer(other.UserId)
+			showToast(if typeof(message) == "string" then message else "Trade request sent", not ok)
+			invite.Text = "🤝 INVITE TO TRADE"
+		end)
+	end
+end
+
+-- A trade in progress: both offers, both confirmations, and what the swap is worth.
+local function renderTradeSession(session: Trading.Session)
+	local you, them = session.You, session.Them
+	local BAR_HEIGHT = 46
+
+	local function panel(xScale: number): Frame
+		local frame = make("Frame", {
+			Position = UDim2.new(xScale, 0, 0, 0),
+			Size = UDim2.new(0.49, 0, 1, -(BAR_HEIGHT + 10)),
+			BackgroundColor3 = THEME.BgCard,
+			BorderSizePixel = 0,
+			Parent = tradeBodyFrame,
+		})
+		addCorner(frame, 10)
+		addStroke(frame, THEME.Stroke, THEME.StrokeTrans)
+		return frame
+	end
+
+	local function panelHeader(parent: Frame, title: string, confirmed: boolean)
+		make("TextLabel", {
+			Position = UDim2.new(0, 14, 0, 14),
+			Size = UDim2.new(1, -130, 0, 18),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+			Text = title,
+			TextColor3 = THEME.TextPrimary,
+			TextSize = 13,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = parent,
+		})
+
+		local pill = make("Frame", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -14, 0, 13),
+			Size = UDim2.new(0, 106, 0, 20),
+			BackgroundColor3 = if confirmed then Color3.fromRGB(20, 48, 34) else Color3.fromRGB(30, 33, 42),
+			BorderSizePixel = 0,
+			Parent = parent,
+		})
+		addCorner(pill, 6)
+		addStroke(pill, if confirmed then THEME.Green else THEME.StrokeLocked, 0.35)
+
+		make("TextLabel", {
+			Size = UDim2.new(1, 0, 1, 0),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = if confirmed then "✓ CONFIRMED" else "NOT CONFIRMED",
+			TextColor3 = if confirmed then THEME.Green else THEME.TextMuted,
+			TextSize = 10,
+			Parent = pill,
+		})
+	end
+
+	local function offerList(parent: Frame): ScrollingFrame
+		local scroll = make("ScrollingFrame", {
+			Position = UDim2.new(0, 14, 0, 78),
+			Size = UDim2.new(1, -28, 0, 150),
+			BackgroundColor3 = THEME.BgLocked,
+			BorderSizePixel = 0,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			ScrollBarThickness = 5,
+			ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
+			Parent = parent,
+		})
+		addCorner(scroll, 8)
+		make("UIPadding", {
+			PaddingTop = UDim.new(0, 8),
+			PaddingBottom = UDim.new(0, 8),
+			PaddingLeft = UDim.new(0, 8),
+			PaddingRight = UDim.new(0, 8),
+			Parent = scroll,
+		})
+		make("UIListLayout", {
+			Padding = UDim.new(0, 8),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = scroll,
+		})
+		return scroll
+	end
+
+	local function sectionLabel(parent: Frame, text: string)
+		make("TextLabel", {
+			Position = UDim2.new(0, 14, 0, 236),
+			Size = UDim2.new(1, -28, 0, 16),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = text,
+			TextColor3 = THEME.TextSecondary,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = parent,
+		})
+	end
+
+	-- YOUR SIDE
+	local yourPanel = panel(0)
+	panelHeader(yourPanel, string.format("YOUR OFFER  %d/%d", #you.Offer, Trading.MaxOffer), you.Confirmed)
+	identityStrip(yourPanel, you)
+
+	local yourOffer = offerList(yourPanel)
+	if #you.Offer == 0 then
+		emptyNote(yourOffer, "Nothing on the table yet.\nPick a vehicle from your garage below.", 1)
+	end
+	for i, entry in you.Offer do
+		tradeOfferCard(yourOffer, entry, i, function()
+			tradeAction("withdraw", entry.CarId)
+		end)
+	end
+
+	sectionLabel(yourPanel, "ADD FROM YOUR GARAGE")
+	local picker = make("ScrollingFrame", {
+		Position = UDim2.new(0, 14, 0, 256),
+		Size = UDim2.new(1, -28, 1, -270),
+		BackgroundTransparency = 1,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 5,
+		ScrollBarImageColor3 = Color3.fromRGB(60, 68, 86),
+		BorderSizePixel = 0,
+		Parent = yourPanel,
+	})
+	make("UIListLayout", {
+		Padding = UDim.new(0, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = picker,
+	})
+
+	local onTable: { [string]: boolean } = {}
+	for _, entry in you.Offer do
+		onTable[entry.CarId] = true
+	end
+
+	local addable = 0
+	for i, car in CarCatalog.getAll() do
+		if localData.OwnedCars[car.Id] and Trading.isTradeable(car) and not onTable[car.Id] then
+			addable += 1
+			tradeGarageRow(picker, car, i)
+		end
+	end
+	if addable == 0 then
+		emptyNote(picker, "Nothing left to offer. Starter vehicles cannot be traded.", 1)
+	end
+
+	-- THEIR SIDE
+	local theirPanel = panel(0.51)
+	panelHeader(theirPanel, string.format("THEIR OFFER  %d/%d", #them.Offer, Trading.MaxOffer), them.Confirmed)
+	identityStrip(theirPanel, them)
+
+	local theirOffer = offerList(theirPanel)
+	if #them.Offer == 0 then
+		emptyNote(theirOffer, string.format("%s has not offered anything yet.", them.DisplayName), 1)
+	end
+	for i, entry in them.Offer do
+		tradeOfferCard(theirOffer, entry, i, nil)
+	end
+
+	sectionLabel(theirPanel, "TRADE SUMMARY")
+	local summary = make("Frame", {
+		Position = UDim2.new(0, 14, 0, 256),
+		Size = UDim2.new(1, -28, 1, -270),
+		BackgroundColor3 = THEME.BgLocked,
+		BorderSizePixel = 0,
+		Parent = theirPanel,
+	})
+	addCorner(summary, 8)
+	addStroke(summary, THEME.Stroke, THEME.StrokeTrans)
+
+	local function summaryRow(y: number, label: string, value: string, color: Color3)
+		make("TextLabel", {
+			Position = UDim2.new(0, 12, 0, y),
+			Size = UDim2.new(0.5, -12, 0, 16),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+			Text = label,
+			TextColor3 = THEME.TextSecondary,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = summary,
+		})
+		make("TextLabel", {
+			Position = UDim2.new(0.5, 0, 0, y),
+			Size = UDim2.new(0.5, -12, 0, 16),
+			BackgroundTransparency = 1,
+			FontFace = Font.fromEnum(Enum.Font.GothamBold),
+			Text = value,
+			TextColor3 = color,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Parent = summary,
+		})
+	end
+
+	local giving, getting = offerValue(you.Offer), offerValue(them.Offer)
+	summaryRow(10, "You give", string.format("%d vehicle(s) • %s", #you.Offer, formatCash(giving)), THEME.TextPrimary)
+	summaryRow(30, "You receive", string.format("%d vehicle(s) • %s", #them.Offer, formatCash(getting)), THEME.TextPrimary)
+
+	local net = getting - giving
+	summaryRow(
+		50,
+		"Value swing",
+		(if net >= 0 then "+" else "-") .. formatCash(math.abs(net)),
+		if net >= 0 then THEME.Green else THEME.Red
+	)
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 12, 0, 74),
+		Size = UDim2.new(1, -24, 1, -84),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = "Changing either offer clears both confirmations, so what you confirm is always what you are looking at. Paint and ownership history travel with each car.",
+		TextColor3 = THEME.TextMuted,
+		TextSize = 10,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Parent = summary,
+	})
+
+	-- ACTION BAR
+	local bar = make("Frame", {
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 0, 1, 0),
+		Size = UDim2.new(1, 0, 0, BAR_HEIGHT),
+		BackgroundTransparency = 1,
+		Parent = tradeBodyFrame,
+	})
+
+	local status, statusColor
+	if you.Confirmed and them.Confirmed then
+		status, statusColor = "Both sides confirmed -- settling the trade...", THEME.Green
+	elseif you.Confirmed then
+		status, statusColor = string.format("You have confirmed. Waiting on %s.", them.DisplayName), THEME.Gold
+	elseif them.Confirmed then
+		status, statusColor = string.format("%s has confirmed -- your move.", them.DisplayName), THEME.Green
+	else
+		status, statusColor = "Neither side has confirmed yet.", THEME.TextSecondary
+	end
+
+	make("TextLabel", {
+		Size = UDim2.new(1, -350, 1, 0),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = status,
+		TextColor3 = statusColor,
+		TextSize = 12,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = bar,
+	})
+
+	local confirmBtn = make("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -140, 0.5, 0),
+		Size = UDim2.new(0, 200, 0, 36),
+		BackgroundColor3 = if you.Confirmed then Color3.fromRGB(58, 48, 12) else THEME.Green,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = if you.Confirmed then "✓ CONFIRMED (UNDO)" else "✓ CONFIRM TRADE",
+		TextColor3 = if you.Confirmed then THEME.Gold else Color3.fromRGB(255, 255, 255),
+		TextSize = 12,
+		BorderSizePixel = 0,
+		Parent = bar,
+	})
+	addCorner(confirmBtn, 8)
+
+	confirmBtn.MouseButton1Click:Connect(function()
+		tradeAction(if you.Confirmed then "unconfirm" else "confirm", nil)
+	end)
+
+	local cancelBtn = make("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.new(0, 130, 0, 36),
+		BackgroundColor3 = Color3.fromRGB(48, 24, 26),
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "✕ CALL OFF",
+		TextColor3 = THEME.Red,
+		TextSize = 12,
+		BorderSizePixel = 0,
+		Parent = bar,
+	})
+	addCorner(cancelBtn, 8)
+
+	cancelBtn.MouseButton1Click:Connect(function()
+		tradeAction("cancel", nil)
+	end)
+end
+
+function renderTradeContent()
+	if not tradeBodyFrame then
+		return
+	end
+	tradeBodyFrame:ClearAllChildren()
+
+	if tradeSession then
+		renderTradeSession(tradeSession)
+	else
+		renderTraderPicker()
+	end
+end
+
+-- The incoming-request prompt, and its countdown. tradeInvite is what the server
+-- sent; it lapses on its own when the clock runs out, exactly as it does there.
+local function updateTradeInvitePrompt()
+	if not (tradeInviteFrame and tradeInvite) then
+		return
+	end
+
+	local left = tradeInvite.ExpiresAt - Workspace:GetServerTimeNow()
+	if left <= 0 then
+		tradeInvite = nil
+		tradeInviteFrame.Visible = false
+		return
+	end
+
+	tradeInviteTimer.Text = string.format("%ds", math.ceil(left))
+	tradeInviteFill.Size = UDim2.fromScale(math.clamp(left / math.max(tradeInvite.Seconds or 1, 1), 0, 1), 1)
+end
+
+local function showTradeInvite(invite: any)
+	tradeInvite = invite
+	if not tradeInviteFrame then
+		return
+	end
+
+	if not invite then
+		tradeInviteFrame.Visible = false
+		return
+	end
+
+	tradeInviteAvatar.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=100&h=100", invite.FromUserId)
+	tradeInviteName.Text = invite.FromDisplayName
+	tradeInviteId.Text = string.format("@%s • PLAYER ID %d", invite.FromName, invite.FromUserId)
+	updateTradeInvitePrompt()
+
+	tradeInviteFrame.Visible = true
+	tradeInviteFrame.Position = UDim2.new(0.5, 0, 0, -180)
+	TweenService:Create(tradeInviteFrame, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Position = UDim2.new(0.5, 0, 0, 76),
+	}):Play()
+end
+
+local function answerTradeInvite(accept: boolean)
+	if not tradeInvite then
+		return
+	end
+	showTradeInvite(nil)
+
+	if not tradeRespondRemote then
+		return
+	end
+	local ok, message = tradeRespondRemote:InvokeServer(accept)
+	if not ok then
+		showToast(if typeof(message) == "string" then message else "That request is gone", true)
+	elseif not accept then
+		showToast("Trade request declined", false)
+	end
+end
+
 -- Build the Full Screen GUI
 local function buildInterface()
 	screenGui = make("ScreenGui", {
@@ -1406,7 +2227,7 @@ local function buildInterface()
 		Name = "NavDock",
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 20, 0.5, 0),
-		Size = UDim2.new(0, 150, 0, 310),
+		Size = UDim2.new(0, 150, 0, 360),
 		BackgroundColor3 = THEME.BgModal,
 		BackgroundTransparency = 0.12,
 		BorderSizePixel = 0,
@@ -1548,8 +2369,9 @@ local function buildInterface()
 	local cardexBtn, cBadge = makeNavButton(3, "CardexBtn", "CARDEX", "🗂️")
 	dockCardexBadge = cBadge
 	local garageBtn = makeNavButton(4, "GarageBtn", "GARAGE", "🚘")
-	local shopBtn = makeNavButton(5, "ShopBtn", "ROBUX SHOP", "🛍️")
-	local playBtn = makeNavButton(6, "PlayBtn", "PLAY", "▶", true)
+	local tradeBtn = makeNavButton(5, "TradeBtn", "TRADE", "🤝")
+	local shopBtn = makeNavButton(6, "ShopBtn", "ROBUX SHOP", "🛍️")
+	local playBtn = makeNavButton(7, "PlayBtn", "PLAY", "▶", true)
 
 	cardexBtn.MouseButton1Click:Connect(function()
 		openModal(cardexModal)
@@ -1557,6 +2379,9 @@ local function buildInterface()
 	garageBtn.MouseButton1Click:Connect(function()
 		garageCurrentTab = "GARAGE"
 		openModal(garageModal)
+	end)
+	tradeBtn.MouseButton1Click:Connect(function()
+		openModal(tradeModal)
 	end)
 	shopBtn.MouseButton1Click:Connect(function()
 		openModal(shopModal)
@@ -1828,6 +2653,150 @@ local function buildInterface()
 		Parent = garageModal,
 	})
 
+	-- 4. TRADE MODAL (player list, or the open trade with both offers side by side)
+	tradeModal = makeBaseModal(
+		"TradeModal",
+		"VEHICLE TRADING FLOOR",
+		"Swap cars with another player -- every vehicle keeps the name of whoever first owned it"
+	)
+	-- Wider and taller than the others: two offer panels and an action bar.
+	tradeModal.Size = UDim2.new(0, 900, 0, 580)
+
+	tradeBodyFrame = make("Frame", {
+		Position = UDim2.new(0, 24, 0, 78),
+		Size = UDim2.new(1, -48, 1, -94),
+		BackgroundTransparency = 1,
+		Parent = tradeModal,
+	})
+
+	-- THE INCOMING REQUEST PROMPT. Above the modals, since answering it is what
+	-- opens one, and it has a clock running.
+	tradeInviteFrame = make("Frame", {
+		Name = "TradeInvitePrompt",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, -180),
+		Size = UDim2.new(0, 400, 0, 150),
+		BackgroundColor3 = THEME.BgModal,
+		BackgroundTransparency = 0.05,
+		BorderSizePixel = 0,
+		Visible = false,
+		ZIndex = 70,
+		Parent = screenGui,
+	})
+	addCorner(tradeInviteFrame, 12)
+	addStroke(tradeInviteFrame, THEME.Accent, 0.3, 1.5)
+
+	make("TextLabel", {
+		Position = UDim2.new(0, 16, 0, 12),
+		Size = UDim2.new(1, -80, 0, 16),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+		Text = "🤝 INCOMING TRADE REQUEST",
+		TextColor3 = THEME.Accent,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = tradeInviteFrame,
+	})
+
+	tradeInviteTimer = make("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -16, 0, 12),
+		Size = UDim2.new(0, 48, 0, 16),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "30s",
+		TextColor3 = THEME.Gold,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = tradeInviteFrame,
+	})
+
+	tradeInviteAvatar = make("ImageLabel", {
+		Position = UDim2.new(0, 16, 0, 38),
+		Size = UDim2.new(0, 52, 0, 52),
+		BackgroundColor3 = THEME.BgLocked,
+		BorderSizePixel = 0,
+		Parent = tradeInviteFrame,
+	})
+	addCorner(tradeInviteAvatar, 26)
+
+	tradeInviteName = make("TextLabel", {
+		Position = UDim2.new(0, 80, 0, 42),
+		Size = UDim2.new(1, -96, 0, 20),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "",
+		TextColor3 = THEME.TextPrimary,
+		TextSize = 15,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = tradeInviteFrame,
+	})
+
+	tradeInviteId = make("TextLabel", {
+		Position = UDim2.new(0, 80, 0, 64),
+		Size = UDim2.new(1, -96, 0, 16),
+		BackgroundTransparency = 1,
+		FontFace = Font.fromEnum(Enum.Font.GothamMedium),
+		Text = "",
+		TextColor3 = THEME.TextMuted,
+		TextSize = 11,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = tradeInviteFrame,
+	})
+
+	local inviteTrack = make("Frame", {
+		Position = UDim2.new(0, 16, 0, 98),
+		Size = UDim2.new(1, -32, 0, 6),
+		BackgroundColor3 = Color3.fromRGB(36, 42, 58),
+		BorderSizePixel = 0,
+		Parent = tradeInviteFrame,
+	})
+	addCorner(inviteTrack, 3)
+
+	tradeInviteFill = make("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.Accent,
+		BorderSizePixel = 0,
+		Parent = inviteTrack,
+	})
+	addCorner(tradeInviteFill, 3)
+
+	local acceptBtn = make("TextButton", {
+		Position = UDim2.new(0, 16, 0, 112),
+		Size = UDim2.new(0.62, -20, 0, 30),
+		BackgroundColor3 = THEME.Green,
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "✓ OPEN TRADE WINDOW",
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		TextSize = 12,
+		BorderSizePixel = 0,
+		Parent = tradeInviteFrame,
+	})
+	addCorner(acceptBtn, 6)
+
+	local declineBtn = make("TextButton", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -16, 0, 112),
+		Size = UDim2.new(0.38, -12, 0, 30),
+		BackgroundColor3 = Color3.fromRGB(42, 46, 58),
+		FontFace = Font.fromEnum(Enum.Font.GothamBold),
+		Text = "DECLINE",
+		TextColor3 = THEME.TextSecondary,
+		TextSize = 12,
+		BorderSizePixel = 0,
+		Parent = tradeInviteFrame,
+	})
+	addCorner(declineBtn, 6)
+
+	acceptBtn.MouseButton1Click:Connect(function()
+		answerTradeInvite(true)
+	end)
+	declineBtn.MouseButton1Click:Connect(function()
+		answerTradeInvite(false)
+	end)
+
 	-- Hotkeys: Escape to close modals, M to toggle menu
 	UserInputService.InputBegan:Connect(function(input, processed)
 		if processed then
@@ -1856,11 +2825,41 @@ local function connectRemotes()
 	syncRemote = remotesFolder:WaitForChild("PlayerDataSync", 5) :: RemoteEvent
 	getDataRemote = remotesFolder:WaitForChild("GetPlayerData", 5) :: RemoteFunction
 	buyRemote = remotesFolder:WaitForChild("BuyCar", 5) :: RemoteFunction
-	buyRobuxRemote = remotesFolder:WaitForChild("BuyRobuxProduct", 5) :: RemoteFunction
+	promptPurchaseRemote = remotesFolder:WaitForChild("RequestPurchasePrompt", 5) :: RemoteEvent
 	spawnRemote = remotesFolder:WaitForChild("SpawnCar", 5) :: RemoteFunction
 	despawnRemote = remotesFolder:WaitForChild("DespawnCar", 5) :: RemoteFunction
 	teleportRemote = remotesFolder:WaitForChild("TeleportToPlay", 5) :: RemoteFunction
 	notifyRemote = remotesFolder:WaitForChild("Notify", 5) :: RemoteEvent
+	tradeRequestRemote = remotesFolder:WaitForChild("TradeRequest", 5) :: RemoteFunction
+	tradeRespondRemote = remotesFolder:WaitForChild("TradeRespond", 5) :: RemoteFunction
+	tradeActionRemote = remotesFolder:WaitForChild("TradeAction", 5) :: RemoteFunction
+	tradeInviteRemote = remotesFolder:WaitForChild("TradeInvite", 5) :: RemoteEvent
+	tradeStateRemote = remotesFolder:WaitForChild("TradeState", 5) :: RemoteEvent
+
+	if tradeInviteRemote then
+		tradeInviteRemote.OnClientEvent:Connect(function(invite)
+			-- nil withdraws the prompt: answered elsewhere, lapsed, or they left.
+			if typeof(invite) == "table" and typeof(invite.FromUserId) == "number" then
+				showTradeInvite(invite)
+			else
+				showTradeInvite(nil)
+			end
+		end)
+	end
+
+	if tradeStateRemote then
+		tradeStateRemote.OnClientEvent:Connect(function(state)
+			tradeSession = if typeof(state) == "table" then state else nil
+
+			if tradeSession and currentModal ~= tradeModal then
+				-- A trade has just opened, so put it in front of them.
+				showTradeInvite(nil)
+				openModal(tradeModal)
+			elseif currentModal == tradeModal then
+				renderTradeContent()
+			end
+		end)
+	end
 
 	if notifyRemote then
 		notifyRemote.OnClientEvent:Connect(function(message, isError)
@@ -1881,6 +2880,9 @@ local function connectRemotes()
 					renderRobuxShopContent()
 				elseif currentModal == garageModal then
 					renderGarageContent()
+				elseif currentModal == tradeModal then
+					-- What is left to offer has changed with the garage.
+					renderTradeContent()
 				end
 			end
 		end)
@@ -1900,7 +2902,7 @@ end
 function GameUI.start()
 	buildInterface()
 
-	-- Keep the restoration bars counting down while the garage is open.
+	-- Keep the restoration bars, and any trade invite's clock, counting down.
 	local sinceBarUpdate = 0
 	RunService.Heartbeat:Connect(function(deltaTime)
 		sinceBarUpdate += deltaTime
@@ -1909,8 +2911,35 @@ function GameUI.start()
 			if currentModal == garageModal then
 				updateRestorationBars()
 			end
+			if tradeInvite then
+				updateTradeInvitePrompt()
+			end
 		end
 	end)
+
+	-- The trader list is only right while those players are still here.
+	local function refreshTraderList()
+		if currentModal == tradeModal and not tradeSession then
+			renderTradeContent()
+		end
+	end
+	Players.PlayerAdded:Connect(refreshTraderList)
+	Players.PlayerRemoving:Connect(refreshTraderList)
+
+	-- Hide trade prompt on own character
+	local function disableOwnPrompt(char: Model)
+		local hrp = char:WaitForChild("HumanoidRootPart", 5)
+		if hrp then
+			local prompt = hrp:WaitForChild("TradePrompt", 3)
+			if prompt and prompt:IsA("ProximityPrompt") then
+				prompt.Enabled = false
+			end
+		end
+	end
+	if player.Character then
+		task.spawn(disableOwnPrompt, player.Character)
+	end
+	player.CharacterAdded:Connect(disableOwnPrompt)
 
 	connectRemotes()
 	updateHUD()

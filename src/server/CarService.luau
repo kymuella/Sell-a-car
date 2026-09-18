@@ -34,6 +34,7 @@ local DRIVE = CarConfig.Driving
 local GROUND_PROBE_ABOVE = 10
 local GROUND_PROBE_DEPTH = 200
 local STEER_STEP = 0.05 -- relayed steering is rounded to this, so a steady hand replicates nothing
+local PLATE_NAME = "OwnershipPlate"
 
 local CarService = {}
 
@@ -501,6 +502,221 @@ function CarService.placeBarnStandIn(carName: string, origin: CFrame): Model
 	return placeStandIn({ car = carName, origin = origin, snap = true, condition = "Rusted", barnFind = true })
 end
 
+-- Who a spawned car belongs to, and who first owned it. PlayerDataService keeps
+-- the record (PlayerData.CarOrigins) and hands it over on every spawn, because
+-- the origin outlives the owner: it travels with the car through every trade.
+export type Ownership = {
+	OwnerUserId: number,
+	OwnerName: string,
+	OriginalUserId: number,
+	OriginalUserName: string,
+	Trades: number,
+}
+
+local function plateLabel(parent: Instance, y: number, height: number, size: number, bold: boolean): TextLabel
+	local label = Instance.new("TextLabel")
+	label.Position = UDim2.new(0, 10, 0, y)
+	label.Size = UDim2.new(1, -20, 0, height)
+	label.BackgroundTransparency = 1
+	label.FontFace = Font.fromEnum(if bold then Enum.Font.GothamBold else Enum.Font.GothamMedium)
+	label.Text = ""
+	label.TextSize = size
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = parent
+	return label
+end
+
+-- The nameplate above a car, made once and then rewritten. It sits on the
+-- chassis, which is the box the body fits in, so `Size.Y * 0.5` clears the roof.
+local function ownershipPlate(chassis: BasePart): Frame
+	local existing = chassis:FindFirstChild(PLATE_NAME)
+	if existing then
+		return existing:FindFirstChild("Card") :: Frame
+	end
+
+	local plate = Instance.new("BillboardGui")
+	plate.Name = PLATE_NAME
+	plate.Size = UDim2.fromOffset(230, 62)
+	plate.StudsOffsetWorldSpace = Vector3.new(0, chassis.Size.Y * 0.5 + 2.4, 0)
+	plate.MaxDistance = 140
+	plate.LightInfluence = 0
+	plate.AlwaysOnTop = false
+	plate.Parent = chassis
+
+	local card = Instance.new("Frame")
+	card.Name = "Card"
+	card.Size = UDim2.fromScale(1, 1)
+	card.BackgroundColor3 = Color3.fromRGB(16, 19, 26)
+	card.BackgroundTransparency = 0.15
+	card.BorderSizePixel = 0
+	card.Parent = plate
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = card
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "Edge"
+	stroke.Thickness = 1.5
+	stroke.Color = Color3.fromRGB(255, 204, 0)
+	stroke.Parent = card
+
+	plateLabel(card, 6, 16, 14, true).Name = "Owner"
+	plateLabel(card, 23, 14, 11, false).Name = "PlayerId"
+	plateLabel(card, 39, 14, 11, false).Name = "Origin"
+	return card
+end
+
+-- A physical 3D license plate mounted onto the rear bumper/chassis of the car model
+local function physicalLicensePlate(chassis: BasePart): Part
+	local existing = chassis:FindFirstChild("PhysicalLicensePlate")
+	if existing and existing:IsA("Part") then
+		return existing
+	end
+
+	local plate = Instance.new("Part")
+	plate.Name = "PhysicalLicensePlate"
+	plate.Size = Vector3.new(2.4, 1.1, 0.15)
+	plate.Material = Enum.Material.SmoothPlastic
+	plate.Color = Color3.fromRGB(24, 26, 32)
+	plate.CanCollide = false
+	plate.CastShadow = false
+	plate.Massless = true
+
+	-- Position on the rear of the chassis
+	plate.CFrame = chassis.CFrame * CFrame.new(0, -chassis.Size.Y * 0.22, chassis.Size.Z * 0.5 + 0.08)
+	plate.Parent = chassis
+
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = chassis
+	weld.Part1 = plate
+	weld.Parent = plate
+
+	local surfaceGui = Instance.new("SurfaceGui")
+	surfaceGui.Name = "PlateGui"
+	surfaceGui.Face = Enum.NormalId.Back
+	surfaceGui.CanvasSize = Vector2.new(240, 110)
+	surfaceGui.LightInfluence = 0.5
+	surfaceGui.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+	surfaceGui.Parent = plate
+
+	local card = Instance.new("Frame")
+	card.Name = "PlateCard"
+	card.Size = UDim2.fromScale(1, 1)
+	card.BackgroundColor3 = Color3.fromRGB(242, 245, 248)
+	card.BorderSizePixel = 0
+	card.Parent = surfaceGui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = card
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "PlateBorder"
+	stroke.Thickness = 3
+	stroke.Color = Color3.fromRGB(15, 30, 60)
+	stroke.Parent = card
+
+	local idLabel = Instance.new("TextLabel")
+	idLabel.Name = "PlateId"
+	idLabel.Position = UDim2.new(0, 4, 0, 8)
+	idLabel.Size = UDim2.new(1, -8, 0, 54)
+	idLabel.BackgroundTransparency = 1
+	idLabel.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
+	idLabel.Text = ""
+	idLabel.TextColor3 = Color3.fromRGB(15, 30, 60)
+	idLabel.TextScaled = true
+	idLabel.Parent = card
+
+	local origLabel = Instance.new("TextLabel")
+	origLabel.Name = "PlateOrigin"
+	origLabel.Position = UDim2.new(0, 4, 0, 68)
+	origLabel.Size = UDim2.new(1, -8, 0, 32)
+	origLabel.BackgroundTransparency = 1
+	origLabel.FontFace = Font.fromEnum(Enum.Font.GothamBold)
+	origLabel.Text = ""
+	origLabel.TextColor3 = Color3.fromRGB(60, 75, 100)
+	origLabel.TextScaled = true
+	origLabel.Parent = card
+
+	return plate
+end
+
+--[[
+	Records on `car` who is driving it away and who first owned it: as attributes
+	any script can read, on a nameplate above the roof, and on a physical 3D plate.
+]]
+function CarService.stampOwnership(car: Model, info: Ownership)
+	car:SetAttribute("OwnerUserId", info.OwnerUserId)
+	car:SetAttribute("OwnerName", info.OwnerName)
+	car:SetAttribute("OriginalUserId", info.OriginalUserId)
+	car:SetAttribute("OriginalUserName", info.OriginalUserName)
+	car:SetAttribute("TradeCount", info.Trades)
+
+	local chassis = car.PrimaryPart
+	if not chassis then
+		return
+	end
+
+	local isOriginal = info.OriginalUserId == info.OwnerUserId
+	local card = ownershipPlate(chassis)
+	local edge = card:FindFirstChild("Edge") :: UIStroke
+	local owner = card:FindFirstChild("Owner") :: TextLabel
+	local playerId = card:FindFirstChild("PlayerId") :: TextLabel
+	local origin = card:FindFirstChild("Origin") :: TextLabel
+
+	edge.Color = if isOriginal then Color3.fromRGB(255, 204, 0) else Color3.fromRGB(0, 160, 255)
+
+	owner.Text = "🔑 " .. info.OwnerName
+	owner.TextColor3 = Color3.fromRGB(245, 247, 250)
+
+	playerId.Text = string.format("PLAYER ID %d", info.OwnerUserId)
+	playerId.TextColor3 = Color3.fromRGB(156, 163, 175)
+
+	if isOriginal then
+		origin.Text = "⭐ ORIGINAL OWNER"
+		origin.TextColor3 = Color3.fromRGB(255, 204, 0)
+	else
+		origin.Text = string.format(
+			"↔ Originally %s (ID %d) • %d trade%s",
+			info.OriginalUserName,
+			info.OriginalUserId,
+			info.Trades,
+			if info.Trades == 1 then "" else "s"
+		)
+		origin.TextColor3 = Color3.fromRGB(0, 160, 255)
+	end
+
+	-- Update physical 3D license plate on the model
+	local physPlate = physicalLicensePlate(chassis)
+	local surfGui = physPlate:FindFirstChild("PlateGui") :: SurfaceGui?
+	local plateCard = surfGui and surfGui:FindFirstChild("PlateCard") :: Frame?
+	if plateCard then
+		local plateBorder = plateCard:FindFirstChild("PlateBorder") :: UIStroke?
+		local idLbl = plateCard:FindFirstChild("PlateId") :: TextLabel?
+		local origLbl = plateCard:FindFirstChild("PlateOrigin") :: TextLabel?
+		if plateBorder then
+			plateBorder.Color = if isOriginal then Color3.fromRGB(220, 160, 0) else Color3.fromRGB(0, 120, 215)
+		end
+		if idLbl then
+			idLbl.Text = string.format("ID %d", info.OwnerUserId)
+		end
+		if origLbl then
+			origLbl.Text = if isOriginal
+				then "⭐ ORIGINAL OWNER"
+				else string.format("ORIG: %s (#%d)", info.OriginalUserName, info.Trades)
+		end
+	end
+
+	-- Update proximity prompts on the car
+	for _, desc in car:GetDescendants() do
+		if desc:IsA("ProximityPrompt") then
+			desc.ObjectText = string.format("%s (Owner: %s | ID %d)", car.Name, info.OwnerName, info.OwnerUserId)
+		end
+	end
+end
+
 local playerCars: { [Player]: Model } = {}
 
 function CarService.despawnForPlayer(player: Player): boolean
@@ -511,6 +727,16 @@ function CarService.despawnForPlayer(player: Player): boolean
 		return true
 	end
 	return false
+end
+
+--[[
+	Which car `player` has out, if any. PlayerDataService asks after a trade, so a
+	car someone has just given away does not stay on the road under them.
+]]
+function CarService.spawnedCarIdFor(player: Player): string?
+	local car = playerCars[player]
+	local carId = car and car.Parent and car:GetAttribute("CarId")
+	return if typeof(carId) == "string" then carId else nil
 end
 
 function CarService.spawnForPlayer(player: Player, carId: string, customPaint: Color3?): (boolean, string, Model?)
@@ -540,7 +766,8 @@ function CarService.spawnForPlayer(player: Player, carId: string, customPaint: C
 		return false, "Failed to build car", nil
 	end
 
-	car:SetAttribute("OwnerUserId", player.UserId)
+	-- Who owns it is stampOwnership's to write: only PlayerDataService knows who
+	-- first owned this car, and the nameplate has to say.
 	playerCars[player] = car
 
 	return true, "Car spawned!", car

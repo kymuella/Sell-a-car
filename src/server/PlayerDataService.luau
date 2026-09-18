@@ -2,18 +2,29 @@
 	PlayerDataService -- Manages economy, inventory, cardex discovery,
 	and remote request handlers for Shop, Garage, and Teleportation.
 
+	Real-money purchases are not handled here: MonetizationService owns them and
+	calls addCash / setPassOwned once MarketplaceService has confirmed a sale.
+
 	Also the garage's restoration bay: a barn find delivered by BarnService
 	becomes a restoration job, which goes through retrieval and then
 	recuperation (CarConfig.Restoration) before the car is added to OwnedCars.
+
+	Every car a player owns carries a CarOrigins record naming whoever first
+	owned it. Buying, claiming or restoring a car writes that record; trading it
+	hands the record over untouched but for a bumped trade count, so a car that
+	has changed hands still says where it came from. swapCars is where two
+	players' cars move, and TradingService is the only caller.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local CarFolder = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Car")
+local SharedFolder = ReplicatedStorage:WaitForChild("Shared")
+local CarFolder = SharedFolder:WaitForChild("Car")
 local CarCatalog = require(CarFolder.CarCatalog)
 local CarConfig = require(CarFolder.CarConfig)
+local Trading = require(SharedFolder.Trading)
 local CarService = require(script.Parent.CarService)
 
 local RESTORATION = CarConfig.Restoration
@@ -29,6 +40,15 @@ export type RestorationJob = {
 	RecuperationSeconds: number,
 }
 
+-- Who first owned a car, and how many times it has changed hands since. Follows
+-- the car through every trade; CarService.stampOwnership puts it on the model.
+export type CarOrigin = {
+	OriginalUserId: number,
+	OriginalUserName: string,
+	AcquiredAt: number,
+	Trades: number,
+}
+
 export type PlayerData = {
 	Cash: number,
 	OwnedCars: { [string]: boolean },
@@ -39,18 +59,26 @@ export type PlayerData = {
 	IsVIP: boolean,
 	HasNitro: boolean,
 	Restorations: { RestorationJob },
+	CarOrigins: { [string]: CarOrigin },
 }
 
 local sessionData: { [Player]: PlayerData } = {}
 local remotesFolder: Folder
 local syncRemote: RemoteEvent
 local buyRemote: RemoteFunction
-local buyRobuxRemote: RemoteFunction
 local spawnRemote: RemoteFunction
 local despawnRemote: RemoteFunction
 local teleportRemote: RemoteFunction
 local getDataRemote: RemoteFunction
 local notifyRemote: RemoteEvent
+
+-- The only PlayerData fields a game pass may set, so a bad flag name cannot
+-- write a new field onto someone's data.
+local PASS_FLAGS: { [string]: boolean } = {
+	Has2xCash = true,
+	IsVIP = true,
+	HasNitro = true,
+}
 
 local STARTING_CASH = 25000
 local PLAYTIME_BONUS = 500
@@ -72,6 +100,24 @@ local function createDefaultData(): PlayerData
 		IsVIP = false,
 		HasNitro = false,
 		Restorations = {},
+		CarOrigins = {},
+	}
+end
+
+--[[
+	Names `player` the original user of `carId`, unless the car already carries
+	someone's name -- a traded car keeps whoever first owned it, and that is what
+	its nameplate shows for the rest of the car's life.
+]]
+local function recordOrigin(player: Player, data: PlayerData, carId: string)
+	if data.CarOrigins[carId] then
+		return
+	end
+	data.CarOrigins[carId] = {
+		OriginalUserId = player.UserId,
+		OriginalUserName = player.Name,
+		AcquiredAt = Workspace:GetServerTimeNow(),
+		Trades = 0,
 	}
 end
 
@@ -95,6 +141,11 @@ end
 local function setupPlayer(player: Player)
 	local data = createDefaultData()
 	sessionData[player] = data
+
+	-- The starter car came from nobody else, so it is theirs from the start.
+	for carId in data.OwnedCars do
+		recordOrigin(player, data, carId)
+	end
 
 	-- Setup Roblox standard leaderboard stats
 	local leaderstats = Instance.new("Folder")
@@ -149,6 +200,7 @@ local function onBuyCar(player: Player, carId: any): (boolean, string)
 	data.OwnedCars[carId] = true
 	data.CardexDiscovered[carId] = true
 	data.SelectedCar = carId
+	recordOrigin(player, data, carId)
 
 	updateLeaderstats(player, data.Cash)
 	syncToClient(player)
@@ -181,7 +233,20 @@ local function onSpawnCar(player: Player, carId: any, customPaint: any): (boolea
 		paintColor = Color3.new(p.R, p.G, p.B)
 	end
 
-	local ok, msg = CarService.spawnForPlayer(player, carId, paintColor)
+	recordOrigin(player, data, carId)
+
+	local ok, msg, car = CarService.spawnForPlayer(player, carId, paintColor)
+	if car then
+		local origin = data.CarOrigins[carId]
+		CarService.stampOwnership(car, {
+			OwnerUserId = player.UserId,
+			OwnerName = player.DisplayName,
+			OriginalUserId = origin.OriginalUserId,
+			OriginalUserName = origin.OriginalUserName,
+			Trades = origin.Trades,
+		})
+	end
+
 	syncToClient(player)
 	return ok, msg
 end
@@ -264,6 +329,8 @@ local function finishRestorations()
 				table.remove(data.Restorations, i)
 				data.OwnedCars[job.CarId] = true
 				data.CardexDiscovered[job.CarId] = true
+				-- They pulled it out of a barn, so the car starts its history here.
+				recordOrigin(player, data, job.CarId)
 				changed = true
 
 				local car = CarCatalog.get(job.CarId)
@@ -279,51 +346,150 @@ local function finishRestorations()
 	end
 end
 
-local function onBuyRobuxProduct(player: Player, productId: any): (boolean, string)
+--[[
+	Who first owned `player`'s `carId`, if their data is loaded and they own it.
+]]
+function PlayerDataService.originOf(player: Player, carId: string): CarOrigin?
 	local data = sessionData[player]
-	if not data then
-		return false, "Player data not loaded"
+	return if data then data.CarOrigins[carId] else nil
+end
+
+--[[
+	Why `owner` cannot hand `carId` to `receiver`, or nil if they can. Only
+	TradingService asks, and it asks again through swapCars before anything moves.
+]]
+function PlayerDataService.offerProblem(owner: Player, receiver: Player, carId: any): string?
+	local ownerData, receiverData = sessionData[owner], sessionData[receiver]
+	if not (ownerData and receiverData) then
+		return "Player data is not loaded"
+	end
+	if typeof(carId) ~= "string" then
+		return "That vehicle is not in the catalog"
+	end
+	return Trading.offerProblem(
+		CarCatalog.get(carId),
+		owner.Name,
+		ownerData.OwnedCars,
+		receiver.Name,
+		receiverData.OwnedCars
+	)
+end
+
+-- Hands one car over: the origin record goes with it, one trade heavier, and so
+-- does the paint, which belongs to the car rather than to whoever had it last.
+local function handOver(from: Player, fromData: PlayerData, toData: PlayerData, carId: string)
+	local origin = fromData.CarOrigins[carId]
+	fromData.OwnedCars[carId] = nil
+	fromData.CarOrigins[carId] = nil
+
+	toData.OwnedCars[carId] = true
+	toData.CardexDiscovered[carId] = true
+	toData.CarOrigins[carId] = {
+		OriginalUserId = if origin then origin.OriginalUserId else from.UserId,
+		OriginalUserName = if origin then origin.OriginalUserName else from.Name,
+		AcquiredAt = Workspace:GetServerTimeNow(),
+		Trades = (if origin then origin.Trades else 0) + 1,
+	}
+
+	toData.Paints[carId] = fromData.Paints[carId]
+	fromData.Paints[carId] = nil
+end
+
+-- Nobody is left selecting, or driving, a car they have just traded away.
+local function releaseTradedAway(player: Player, data: PlayerData)
+	if not data.OwnedCars[data.SelectedCar] then
+		for _, car in CarCatalog.getAll() do
+			if data.OwnedCars[car.Id] then
+				data.SelectedCar = car.Id
+				break
+			end
+		end
 	end
 
-	if productId == "cash_small" then
-		data.Cash += 50000
-		updateLeaderstats(player, data.Cash)
-		syncToClient(player)
-		return true, "Acquired +$50,000 Cash!"
-	elseif productId == "cash_medium" then
-		data.Cash += 200000
-		updateLeaderstats(player, data.Cash)
-		syncToClient(player)
-		return true, "Acquired +$200,000 Cash!"
-	elseif productId == "cash_large" then
-		data.Cash += 1000000
-		updateLeaderstats(player, data.Cash)
-		syncToClient(player)
-		return true, "Acquired +$1,000,000 Cash!"
-	elseif productId == "pass_2xcash" then
-		if data.Has2xCash then
-			return false, "You already own the 2x Cash Multiplier!"
-		end
-		data.Has2xCash = true
-		syncToClient(player)
-		return true, "Unlocked 2x Cash Multiplier!"
-	elseif productId == "pass_vip" then
-		if data.IsVIP then
-			return false, "You already own the VIP Pass!"
-		end
-		data.IsVIP = true
-		syncToClient(player)
-		return true, "Unlocked VIP Pass!"
-	elseif productId == "pass_nitro" then
-		if data.HasNitro then
-			return false, "You already own the Nitro Boost Pass!"
-		end
-		data.HasNitro = true
-		syncToClient(player)
-		return true, "Unlocked Nitro Boost!"
-	else
-		return false, "Unknown product"
+	local spawned = CarService.spawnedCarIdFor(player)
+	if spawned and not data.OwnedCars[spawned] then
+		CarService.despawnForPlayer(player)
 	end
+end
+
+--[[
+	Swaps `aCars` for `bCars` between two players, or changes nothing at all.
+	Every car is checked against Trading's rules first, so a trade that has gone
+	stale since it was agreed -- a car restored, bought or traded away in the
+	meantime -- fails whole and says which car spoiled it. TradingService is the
+	only caller, and only once both players have confirmed.
+]]
+function PlayerDataService.swapCars(a: Player, aCars: { string }, b: Player, bCars: { string }): (boolean, string)
+	local dataA, dataB = sessionData[a], sessionData[b]
+	if not (dataA and dataB) then
+		return false, "Player data is not loaded"
+	end
+
+	for _, side in { { from = a, cars = aCars, to = b }, { from = b, cars = bCars, to = a } } do
+		local seen: { [string]: boolean } = {}
+		for _, carId in side.cars do
+			if typeof(carId) ~= "string" or seen[carId] then
+				return false, "That trade is no longer valid"
+			end
+			seen[carId] = true
+			local problem = PlayerDataService.offerProblem(side.from, side.to, carId)
+			if problem then
+				return false, problem
+			end
+		end
+	end
+
+	for _, carId in aCars do
+		handOver(a, dataA, dataB, carId)
+	end
+	for _, carId in bCars do
+		handOver(b, dataB, dataA, carId)
+	end
+
+	releaseTradedAway(a, dataA)
+	releaseTradedAway(b, dataB)
+	syncToClient(a)
+	syncToClient(b)
+	return true, "Trade complete"
+end
+
+--[[
+	Adds `amount` to `player`'s cash. Returns false if their data is not loaded,
+	which is the caller's cue that nothing was granted -- MonetizationService
+	relies on that to hold a receipt open instead of consuming it.
+]]
+function PlayerDataService.addCash(player: Player, amount: number): boolean
+	local data = sessionData[player]
+	if not data or typeof(amount) ~= "number" then
+		return false
+	end
+
+	data.Cash += amount
+	updateLeaderstats(player, data.Cash)
+	syncToClient(player)
+	return true
+end
+
+--[[
+	Mirrors Roblox-side game pass ownership onto `player`'s data. Only
+	MonetizationService calls this, and only after MarketplaceService has
+	confirmed ownership -- these flags are what the game reads for 2x cash,
+	VIP and nitro, so nothing a client sends may reach them.
+]]
+function PlayerDataService.setPassOwned(player: Player, flag: string, owned: boolean): boolean
+	local data = sessionData[player]
+	if not data or not PASS_FLAGS[flag] then
+		return false
+	end
+
+	local record = data :: any
+	if record[flag] == owned then
+		return true
+	end
+
+	record[flag] = owned
+	syncToClient(player)
+	return true
 end
 
 function PlayerDataService.start()
@@ -345,11 +511,6 @@ function PlayerDataService.start()
 	buyRemote.Name = "BuyCar"
 	buyRemote.OnServerInvoke = onBuyCar
 	buyRemote.Parent = remotesFolder
-
-	buyRobuxRemote = Instance.new("RemoteFunction")
-	buyRobuxRemote.Name = "BuyRobuxProduct"
-	buyRobuxRemote.OnServerInvoke = onBuyRobuxProduct
-	buyRobuxRemote.Parent = remotesFolder
 
 	spawnRemote = Instance.new("RemoteFunction")
 	spawnRemote.Name = "SpawnCar"
