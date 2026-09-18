@@ -83,6 +83,7 @@ local PASS_FLAGS: { [string]: boolean } = {
 local STARTING_CASH = 25000
 local PLAYTIME_BONUS = 500
 local PLAYTIME_INTERVAL = 60
+local playerJoinIndex = 0
 
 local function createDefaultData(): PlayerData
 	local defaultCar = CarCatalog.getDefault()
@@ -139,10 +140,31 @@ local function updateLeaderstats(player: Player, cash: number)
 end
 
 local function setupPlayer(player: Player)
+	playerJoinIndex += 1
 	local data = createDefaultData()
 	sessionData[player] = data
 
-	-- The starter car came from nobody else, so it is theirs from the start.
+	-- Give each player 2 tradeable cars with complementary sets so any two players can trade right away
+	-- Set A: "ApexGT" (Apex GT3) & "Monaco74" (Monaco Classic 1974)
+	-- Set B: "SpectreV10" (Spectre V10) & "PhantomEV" (Phantom Hyper EV)
+	local tradeableSets = if playerJoinIndex % 2 == 1
+		then { "ApexGT", "Monaco74" }
+		else { "SpectreV10", "PhantomEV" }
+
+	for _, carId in tradeableSets do
+		local carEntry = CarCatalog.get(carId)
+		if carEntry then
+			data.OwnedCars[carId] = true
+			data.CardexDiscovered[carId] = true
+			data.Paints[carId] = {
+				R = carEntry.DefaultColor.R,
+				G = carEntry.DefaultColor.G,
+				B = carEntry.DefaultColor.B,
+			}
+		end
+	end
+
+	-- Record provenance for all starting owned cars
 	for carId in data.OwnedCars do
 		recordOrigin(player, data, carId)
 	end

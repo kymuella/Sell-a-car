@@ -63,92 +63,100 @@ local function generateBiomeTerrain(mapFolder: Folder)
 	terrainFolder.Parent = mapFolder
 
 	local bounds = WorldConfig.WorldBounds
-	local totalWidth = bounds.MaxX - bounds.MinX
+	local totalLength = bounds.MaxZ - bounds.MinZ
 
+	-- 1. MASTER UNBREAKABLE BEDROCK FOUNDATION (Guarantees zero void spots anywhere in the entire world)
+	makePart({
+		Name = "MasterBedrockFoundation",
+		Size = Vector3.new(2400, 12, totalLength + 600),
+		CFrame = CFrame.new(0, bounds.GroundY - 8, 0),
+		Color = Color3.fromRGB(32, 34, 38),
+		Material = Enum.Material.Basalt,
+		CanCollide = true,
+		Parent = terrainFolder,
+	})
+
+	-- 2. FULL-WIDTH SEAMLESS BIOME GROUND SLABS (Zero gaps between east/west or north/south)
 	for biomeKey, biome in WorldConfig.Biomes do
 		local biomeLength = biome.MaxZ - biome.MinZ
 		local centerZ = (biome.MinZ + biome.MaxZ) / 2
 
-		-- Left terrain plate
+		-- Solid full-width slab spanning the entire playable width right underneath the highway
 		makePart({
-			Name = biomeKey .. "_Ground_West",
-			Size = Vector3.new(totalWidth / 2 - 40, 4, biomeLength),
-			CFrame = CFrame.new(-totalWidth / 4 - 20, bounds.GroundY - 2, centerZ),
+			Name = biomeKey .. "_Ground_Seamless",
+			Size = Vector3.new(1900, 6, biomeLength + 20), -- +20 studs overlap along Z eliminates any cross-biome cracks
+			CFrame = CFrame.new(0, bounds.GroundY - 2.9, centerZ),
 			Color = biome.GroundColor,
 			Material = biome.GroundMaterial,
-			Parent = terrainFolder,
-		})
-
-		-- Right terrain plate
-		makePart({
-			Name = biomeKey .. "_Ground_East",
-			Size = Vector3.new(totalWidth / 2 - 40, 4, biomeLength),
-			CFrame = CFrame.new(totalWidth / 4 + 20, bounds.GroundY - 2, centerZ),
-			Color = biome.GroundColor,
-			Material = biome.GroundMaterial,
+			CanCollide = true,
 			Parent = terrainFolder,
 		})
 
 		-- Rolling hill mounds in the background for natural depth
-		for i = 1, 4 do
-			local hillX = (if i % 2 == 0 then 1 else -1) * rng:NextNumber(220, 450)
+		for i = 1, 5 do
+			local hillX = (if i % 2 == 0 then 1 else -1) * rng:NextNumber(220, 500)
 			local hillZ = biome.MinZ + rng:NextNumber(40, biomeLength - 40)
-			local hillRadius = rng:NextNumber(60, 110)
-			local hillHeight = rng:NextNumber(20, 45)
+			local hillRadius = rng:NextNumber(70, 130)
+			local hillHeight = rng:NextNumber(25, 55)
 
-			local mound = makePart({
+			makePart({
 				Name = "Mound_" .. biomeKey,
 				Shape = Enum.PartType.Cylinder,
 				Size = Vector3.new(hillHeight, hillRadius * 2, hillRadius * 2),
 				CFrame = CFrame.new(hillX, bounds.GroundY + hillHeight / 2 - 4, hillZ) * CFrame.Angles(0, 0, math.rad(90)),
 				Color = biome.GroundColor,
 				Material = biome.GroundMaterial,
+				CanCollide = true,
 				Parent = terrainFolder,
 			})
 		end
 	end
 
-	-- Mountain Perimeter Walls (Keeps vehicles enclosed and creates majestic horizon)
-	local wallHeight = WorldConfig.EnvironmentScale.MountainWallHeight
-	local totalLength = bounds.MaxZ - bounds.MinZ
+	-- 3. MASSIVE PERIMETER MOUNTAIN WALLS (Completely seals world boundaries, 140 studs high)
+	local wallHeight = 140
+	local wallThickness = 160
 
 	-- West mountain wall
 	makePart({
 		Name = "PerimeterWall_West",
-		Size = Vector3.new(80, wallHeight, totalLength),
-		CFrame = CFrame.new(bounds.MinX + 40, bounds.GroundY + wallHeight / 2 - 2, 0),
+		Size = Vector3.new(wallThickness, wallHeight, totalLength + 400),
+		CFrame = CFrame.new(bounds.MinX - wallThickness / 2 + 20, bounds.GroundY + wallHeight / 2 - 10, 0),
 		Color = Color3.fromRGB(72, 76, 84),
 		Material = Enum.Material.Slate,
+		CanCollide = true,
 		Parent = terrainFolder,
 	})
 
 	-- East mountain wall
 	makePart({
 		Name = "PerimeterWall_East",
-		Size = Vector3.new(80, wallHeight, totalLength),
-		CFrame = CFrame.new(bounds.MaxX - 40, bounds.GroundY + wallHeight / 2 - 2, 0),
+		Size = Vector3.new(wallThickness, wallHeight, totalLength + 400),
+		CFrame = CFrame.new(bounds.MaxX + wallThickness / 2 - 20, bounds.GroundY + wallHeight / 2 - 10, 0),
 		Color = Color3.fromRGB(72, 76, 84),
 		Material = Enum.Material.Slate,
+		CanCollide = true,
 		Parent = terrainFolder,
 	})
 
 	-- North mountain wall
 	makePart({
 		Name = "PerimeterWall_North",
-		Size = Vector3.new(totalWidth, wallHeight, 80),
-		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 2, bounds.MaxZ - 40),
+		Size = Vector3.new(2400, wallHeight, wallThickness),
+		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 10, bounds.MaxZ + wallThickness / 2 - 20),
 		Color = Color3.fromRGB(68, 72, 80),
 		Material = Enum.Material.Slate,
+		CanCollide = true,
 		Parent = terrainFolder,
 	})
 
 	-- South mountain wall
 	makePart({
 		Name = "PerimeterWall_South",
-		Size = Vector3.new(totalWidth, wallHeight, 80),
-		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 2, bounds.MinZ + 40),
+		Size = Vector3.new(2400, wallHeight, wallThickness),
+		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 10, bounds.MinZ - wallThickness / 2 + 20),
 		Color = Color3.fromRGB(68, 72, 80),
 		Material = Enum.Material.Slate,
+		CanCollide = true,
 		Parent = terrainFolder,
 	})
 end
@@ -994,6 +1002,20 @@ end
 function WorldService.start()
 	local mapFolder = getWorldFolder()
 	mapFolder:ClearAllChildren()
+
+	-- Clean up legacy baseplate to prevent z-fighting or gap conflicts
+	local legacyBaseplate = Workspace:FindFirstChild("Baseplate")
+	if legacyBaseplate and legacyBaseplate:IsA("BasePart") then
+		legacyBaseplate.Transparency = 1
+		legacyBaseplate.CanCollide = false
+	end
+
+	-- Clean up any legacy manual garage models placed directly in Workspace
+	for _, child in Workspace:GetChildren() do
+		if child:IsA("Model") and (child.Name == "RestorationGarage" or child.Name == "Restoration Garage") then
+			child:Destroy()
+		end
+	end
 
 	generateBiomeTerrain(mapFolder)
 	generateStraightHighway(mapFolder)
