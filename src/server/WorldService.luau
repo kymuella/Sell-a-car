@@ -1,16 +1,19 @@
 --[[
-	WorldService -- Procedural generation for world biomes, oversized environmental foliage,
-	long straight highways, and randomly generated obstacle courses.
+	WorldService -- Procedural generation for world biomes, crescent player garages,
+	linear non-bisecting highway, and randomly generated obstacle courses.
 
-	Key Features:
-	- Distinct biomes: Central Motors Plaza, Red Rock Desert, Alpine Pine Forest,
-	  Autumn Redwood Valley, and Glacial Tundra.
-	- Oversized environmental props (trees 40-65 studs tall, colossal boulders, towering canyon walls).
-	- Straight 4-lane highway corridor extending over 4,400 studs with double yellow centerlines,
-	  dashed white lane dividers, steel guardrails, overhead sign gantries, and streetlights.
-	- Randomly generated highway obstacles (construction Jersey barriers with flashing beacons,
-	  spilled cargo crates, stalled vehicle wrecks, and tire chicane walls) with evasion lanes.
-	- Integrated rustic barns tagged `BarnSpot` and central restoration garage tagged `GarageDropOff`.
+	Layout & Flow:
+	1. Beginning of the run: Player base garages arranged in a crescent arc (Z: -60 to 120).
+	2. The crescent plaza connects into an on-ramp driveway that tapers and merges
+	   directly into the collective 4-lane highway at Z = 250.
+	3. The highway does NOT bisect the world; it progresses LINEARLY forward from Z = 250
+	   all the way to Z = 4600 through sequential biomes:
+	   - Crescent Hub & Dealership (Start: Z = -200 to 250)
+	   - Autumn Redwood Valley (Z = 250 to 1400)
+	   - Red Rock Desert Canyon (Z = 1400 to 2500)
+	   - Alpine Pine Forest (Z = 2500 to 3600)
+	   - Glacial Tundra & Summit Finish (Z = 3600 to 4700)
+	4. 100% gapless, seamless foundation with master bedrock floor ensuring zero void or fall-through spots.
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -25,9 +28,8 @@ local DROP_OFF_TAG = "GarageDropOff"
 
 local WorldService = {}
 
-local rng = Random.new(1337) -- Deterministic seed for balanced, replayable world generation
+local rng = Random.new(1337)
 
--- Container for all generated world geometry
 local function getWorldFolder(): Folder
 	local existing = Workspace:FindFirstChild("Map")
 	if existing and existing:IsA("Folder") then
@@ -54,7 +56,7 @@ local function makePart(props: { [string]: any }): Part
 end
 
 -- ============================================================================
--- 1. TERRAIN & BIOME GROUND SLABS
+-- 1. SEAMLESS BEDROCK & BIOME GROUND SLABS (ZERO VOID / ZERO FALL-THROUGH)
 -- ============================================================================
 
 local function generateBiomeTerrain(mapFolder: Folder)
@@ -64,38 +66,39 @@ local function generateBiomeTerrain(mapFolder: Folder)
 
 	local bounds = WorldConfig.WorldBounds
 	local totalLength = bounds.MaxZ - bounds.MinZ
+	local totalWidth = bounds.MaxX - bounds.MinX
+	local centerZ = (bounds.MinZ + bounds.MaxZ) / 2
 
-	-- 1. MASTER UNBREAKABLE BEDROCK FOUNDATION (Guarantees zero void spots anywhere in the entire world)
+	-- 1. MASTER BEDROCK FOUNDATION (Extends beyond all edges, 12 studs thick)
 	makePart({
 		Name = "MasterBedrockFoundation",
-		Size = Vector3.new(2400, 12, totalLength + 600),
-		CFrame = CFrame.new(0, bounds.GroundY - 8, 0),
-		Color = Color3.fromRGB(32, 34, 38),
+		Size = Vector3.new(totalWidth + 800, 14, totalLength + 800),
+		CFrame = CFrame.new(0, bounds.GroundY - 9, centerZ),
+		Color = Color3.fromRGB(30, 32, 36),
 		Material = Enum.Material.Basalt,
 		CanCollide = true,
 		Parent = terrainFolder,
 	})
 
-	-- 2. FULL-WIDTH SEAMLESS BIOME GROUND SLABS (Zero gaps between east/west or north/south)
+	-- 2. FULL-WIDTH SEAMLESS BIOME GROUND SLABS (1,900 studs wide, overlapping along Z)
 	for biomeKey, biome in WorldConfig.Biomes do
 		local biomeLength = biome.MaxZ - biome.MinZ
-		local centerZ = (biome.MinZ + biome.MaxZ) / 2
+		local bCenterZ = (biome.MinZ + biome.MaxZ) / 2
 
-		-- Solid full-width slab spanning the entire playable width right underneath the highway
 		makePart({
 			Name = biomeKey .. "_Ground_Seamless",
-			Size = Vector3.new(1900, 6, biomeLength + 20), -- +20 studs overlap along Z eliminates any cross-biome cracks
-			CFrame = CFrame.new(0, bounds.GroundY - 2.9, centerZ),
+			Size = Vector3.new(1900, 6, biomeLength + 20), -- Overlapping by 20 studs along Z eliminates any cracks
+			CFrame = CFrame.new(0, bounds.GroundY - 2.8, bCenterZ),
 			Color = biome.GroundColor,
 			Material = biome.GroundMaterial,
 			CanCollide = true,
 			Parent = terrainFolder,
 		})
 
-		-- Rolling hill mounds in the background for natural depth
+		-- Background rolling hill mounds
 		for i = 1, 5 do
-			local hillX = (if i % 2 == 0 then 1 else -1) * rng:NextNumber(220, 500)
-			local hillZ = biome.MinZ + rng:NextNumber(40, biomeLength - 40)
+			local hillX = (if i % 2 == 0 then 1 else -1) * rng:NextNumber(230, 520)
+			local hillZ = biome.MinZ + rng:NextNumber(50, biomeLength - 50)
 			local hillRadius = rng:NextNumber(70, 130)
 			local hillHeight = rng:NextNumber(25, 55)
 
@@ -112,48 +115,48 @@ local function generateBiomeTerrain(mapFolder: Folder)
 		end
 	end
 
-	-- 3. MASSIVE PERIMETER MOUNTAIN WALLS (Completely seals world boundaries, 140 studs high)
+	-- 3. MASSIVE PERIMETER MOUNTAIN WALLS (140 studs high, 160 studs thick)
 	local wallHeight = 140
 	local wallThickness = 160
 
-	-- West mountain wall
+	-- West wall
 	makePart({
 		Name = "PerimeterWall_West",
-		Size = Vector3.new(wallThickness, wallHeight, totalLength + 400),
-		CFrame = CFrame.new(bounds.MinX - wallThickness / 2 + 20, bounds.GroundY + wallHeight / 2 - 10, 0),
+		Size = Vector3.new(wallThickness, wallHeight, totalLength + 600),
+		CFrame = CFrame.new(bounds.MinX - wallThickness / 2 + 20, bounds.GroundY + wallHeight / 2 - 10, centerZ),
 		Color = Color3.fromRGB(72, 76, 84),
 		Material = Enum.Material.Slate,
 		CanCollide = true,
 		Parent = terrainFolder,
 	})
 
-	-- East mountain wall
+	-- East wall
 	makePart({
 		Name = "PerimeterWall_East",
-		Size = Vector3.new(wallThickness, wallHeight, totalLength + 400),
-		CFrame = CFrame.new(bounds.MaxX + wallThickness / 2 - 20, bounds.GroundY + wallHeight / 2 - 10, 0),
+		Size = Vector3.new(wallThickness, wallHeight, totalLength + 600),
+		CFrame = CFrame.new(bounds.MaxX + wallThickness / 2 - 20, bounds.GroundY + wallHeight / 2 - 10, centerZ),
 		Color = Color3.fromRGB(72, 76, 84),
 		Material = Enum.Material.Slate,
 		CanCollide = true,
 		Parent = terrainFolder,
 	})
 
-	-- North mountain wall
+	-- South wall (Behind the crescent garages)
 	makePart({
-		Name = "PerimeterWall_North",
-		Size = Vector3.new(2400, wallHeight, wallThickness),
-		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 10, bounds.MaxZ + wallThickness / 2 - 20),
+		Name = "PerimeterWall_South",
+		Size = Vector3.new(totalWidth + 600, wallHeight, wallThickness),
+		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 10, bounds.MinZ - wallThickness / 2 + 20),
 		Color = Color3.fromRGB(68, 72, 80),
 		Material = Enum.Material.Slate,
 		CanCollide = true,
 		Parent = terrainFolder,
 	})
 
-	-- South mountain wall
+	-- North wall (At the mountain summit terminus)
 	makePart({
-		Name = "PerimeterWall_South",
-		Size = Vector3.new(2400, wallHeight, wallThickness),
-		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 10, bounds.MinZ - wallThickness / 2 + 20),
+		Name = "PerimeterWall_North",
+		Size = Vector3.new(totalWidth + 600, wallHeight, wallThickness),
+		CFrame = CFrame.new(0, bounds.GroundY + wallHeight / 2 - 10, bounds.MaxZ + wallThickness / 2 - 20),
 		Color = Color3.fromRGB(68, 72, 80),
 		Material = Enum.Material.Slate,
 		CanCollide = true,
@@ -162,19 +165,568 @@ local function generateBiomeTerrain(mapFolder: Folder)
 end
 
 -- ============================================================================
--- 2. OVERSIZED ENVIRONMENTAL ELEMENTS & FOLIAGE
+-- 2. CRESCENT OF PLAYER BASE GARAGES & MERGING DRIVEWAY
+-- ============================================================================
+
+local function generateCrescentGaragesAndDriveway(mapFolder: Folder)
+	local crescentFolder = Instance.new("Folder")
+	crescentFolder.Name = "CrescentGarages"
+	crescentFolder.Parent = mapFolder
+
+	local c = WorldConfig.Crescent
+
+	-- Main Crescent Plaza Apron (Seamless concrete floor where all garages face in)
+	makePart({
+		Name = "CrescentPlazaFloor",
+		Size = Vector3.new(230, 1.5, 180),
+		CFrame = CFrame.new(0, 0.75, 40),
+		Color = Color3.fromRGB(45, 48, 56),
+		Material = Enum.Material.Concrete,
+		CanCollide = true,
+		Parent = crescentFolder,
+	})
+
+	-- Funnel Driveway: Connects the crescent plaza (Z = 120) and merges into highway (Z = 250)
+	local mergeLength = c.MergeZ - 120
+	makePart({
+		Name = "MergeDriveway_Base",
+		Size = Vector3.new(120, 1.5, mergeLength + 10),
+		CFrame = CFrame.new(0, 0.75, 120 + mergeLength / 2),
+		Color = Color3.fromRGB(40, 42, 48),
+		Material = Enum.Material.Concrete,
+		CanCollide = true,
+		Parent = crescentFolder,
+	})
+
+	-- Painted green merge arrows on the driveway pointing forward to the highway
+	for z = 140, 230, 35 do
+		local arrowStem = makePart({
+			Name = "MergeArrow_Stem",
+			Size = Vector3.new(2, 0.05, 10),
+			CFrame = CFrame.new(0, 1.52, z),
+			Color = Color3.fromRGB(46, 204, 113),
+			Material = Enum.Material.Neon,
+			CanCollide = false,
+			Parent = crescentFolder,
+		})
+		makePart({
+			Name = "MergeArrow_HeadL",
+			Size = Vector3.new(2, 0.05, 5),
+			CFrame = CFrame.new(-2, 1.52, z + 4) * CFrame.Angles(0, math.rad(35), 0),
+			Color = Color3.fromRGB(46, 204, 113),
+			Material = Enum.Material.Neon,
+			CanCollide = false,
+			Parent = crescentFolder,
+		})
+		makePart({
+			Name = "MergeArrow_HeadR",
+			Size = Vector3.new(2, 0.05, 5),
+			CFrame = CFrame.new(2, 1.52, z + 4) * CFrame.Angles(0, math.rad(-35), 0),
+			Color = Color3.fromRGB(46, 204, 113),
+			Material = Enum.Material.Neon,
+			CanCollide = false,
+			Parent = crescentFolder,
+		})
+	end
+
+	-- Overhead Entrance Gantry at the merge point (Z = 250)
+	local gantryHeight = 24
+	local gantryZ = c.MergeZ
+	makePart({
+		Name = "EntranceGantry_TowerL",
+		Size = Vector3.new(2.4, gantryHeight, 2.4),
+		CFrame = CFrame.new(-WorldConfig.Highway.Width / 2 - 2, gantryHeight / 2, gantryZ),
+		Color = Color3.fromRGB(50, 54, 62),
+		Material = Enum.Material.Metal,
+		Parent = crescentFolder,
+	})
+	makePart({
+		Name = "EntranceGantry_TowerR",
+		Size = Vector3.new(2.4, gantryHeight, 2.4),
+		CFrame = CFrame.new(WorldConfig.Highway.Width / 2 + 2, gantryHeight / 2, gantryZ),
+		Color = Color3.fromRGB(50, 54, 62),
+		Material = Enum.Material.Metal,
+		Parent = crescentFolder,
+	})
+	makePart({
+		Name = "EntranceGantry_Span",
+		Size = Vector3.new(WorldConfig.Highway.Width + 4, 3, 2.4),
+		CFrame = CFrame.new(0, gantryHeight - 1.5, gantryZ),
+		Color = Color3.fromRGB(50, 54, 62),
+		Material = Enum.Material.Metal,
+		Parent = crescentFolder,
+	})
+	local entSign = makePart({
+		Name = "EntranceSignBoard",
+		Size = Vector3.new(52, 6.5, 1),
+		CFrame = CFrame.new(0, gantryHeight - 4, gantryZ),
+		Color = Color3.fromRGB(0, 122, 204),
+		Material = Enum.Material.SmoothPlastic,
+		Parent = crescentFolder,
+	})
+	local entGui = Instance.new("SurfaceGui")
+	entGui.Name = "SignGui"
+	entGui.Face = Enum.NormalId.Front
+	entGui.CanvasSize = Vector2.new(900, 120)
+	entGui.LightInfluence = 0.2
+	entGui.Parent = entSign
+	local entLabel = Instance.new("TextLabel")
+	entLabel.Size = UDim2.fromScale(1, 1)
+	entLabel.BackgroundTransparency = 1
+	entLabel.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
+	entLabel.Text = "⚡ HIGHWAY MERGE // LINEAR RUN ENTRANCE ⚡"
+	entLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	entLabel.TextSize = 28
+	entLabel.Parent = entGui
+
+	-- Build the Player Base Garages in a Crescent Arc
+	-- We place 6 garages along the crescent arc facing inward toward (0, 90)
+	local angles = { -68, -41, -14, 14, 41, 68 }
+	local focusPoint = Vector3.new(0, 1.5, 80)
+
+	for i, deg in angles do
+		local rad = math.rad(deg)
+		-- Crescent curve positioning
+		local gx = math.sin(rad) * c.Radius
+		local gz = c.Center.Z - math.cos(rad) * (c.Radius * 0.75) + 30
+		local garagePos = Vector3.new(gx, 1.5, gz)
+		local lookTarget = focusPoint
+		local garageCF = CFrame.lookAt(garagePos, Vector3.new(lookTarget.X, garagePos.Y, lookTarget.Z))
+
+		local gModel = Instance.new("Model")
+		gModel.Name = "PlayerGarage_" .. i
+		gModel.Parent = crescentFolder
+
+		local gw, gd, gh = c.GarageWidth, c.GarageDepth, c.GarageHeight
+
+		-- Concrete bay floor
+		makePart({
+			Name = "GarageFloor",
+			Size = Vector3.new(gw, 1, gd),
+			CFrame = garageCF * CFrame.new(0, 0.5, 0),
+			Color = Color3.fromRGB(55, 58, 65),
+			Material = Enum.Material.Concrete,
+			CanCollide = true,
+			Parent = gModel,
+		})
+
+		-- Back wall
+		makePart({
+			Name = "BackWall",
+			Size = Vector3.new(gw, gh, 2),
+			CFrame = garageCF * CFrame.new(0, gh / 2 + 1, -gd / 2 + 1),
+			Color = Color3.fromRGB(38, 40, 46),
+			Material = Enum.Material.SmoothPlastic,
+			CanCollide = true,
+			Parent = gModel,
+		})
+
+		-- Left wall
+		makePart({
+			Name = "LeftWall",
+			Size = Vector3.new(1.8, gh, gd),
+			CFrame = garageCF * CFrame.new(-gw / 2 + 0.9, gh / 2 + 1, 0),
+			Color = Color3.fromRGB(48, 52, 60),
+			Material = Enum.Material.Concrete,
+			CanCollide = true,
+			Parent = gModel,
+		})
+
+		-- Right wall
+		makePart({
+			Name = "RightWall",
+			Size = Vector3.new(1.8, gh, gd),
+			CFrame = garageCF * CFrame.new(gw / 2 - 0.9, gh / 2 + 1, 0),
+			Color = Color3.fromRGB(48, 52, 60),
+			Material = Enum.Material.Concrete,
+			CanCollide = true,
+			Parent = gModel,
+		})
+
+		-- Roof with modern angular fascia
+		makePart({
+			Name = "GarageRoof",
+			Size = Vector3.new(gw + 3, 2, gd + 4),
+			CFrame = garageCF * CFrame.new(0, gh + 1, 1),
+			Color = Color3.fromRGB(24, 26, 30),
+			Material = Enum.Material.Metal,
+			CanCollide = true,
+			Parent = gModel,
+		})
+
+		-- Glowing overhead neon garage bay number
+		local baySign = makePart({
+			Name = "BaySign",
+			Size = Vector3.new(12, 2.5, 0.8),
+			CFrame = garageCF * CFrame.new(0, gh, gd / 2 - 0.4),
+			Color = Color3.fromRGB(0, 160, 255),
+			Material = Enum.Material.Neon,
+			Parent = gModel,
+		})
+		local bGui = Instance.new("SurfaceGui")
+		bGui.Name = "BayGui"
+		bGui.Face = Enum.NormalId.Front
+		bGui.CanvasSize = Vector2.new(300, 60)
+		bGui.Parent = baySign
+		local bLbl = Instance.new("TextLabel")
+		bLbl.Size = UDim2.fromScale(1, 1)
+		bLbl.BackgroundTransparency = 1
+		bLbl.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
+		bLbl.Text = string.format("BAY %02d", i)
+		bLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+		bLbl.TextSize = 24
+		bLbl.Parent = bGui
+
+		-- Interior ceiling lighting
+		local lightFixture = makePart({
+			Name = "CeilingLight",
+			Size = Vector3.new(6, 0.6, 2),
+			CFrame = garageCF * CFrame.new(0, gh - 0.3, 0),
+			Color = Color3.fromRGB(255, 248, 225),
+			Material = Enum.Material.Neon,
+			Parent = gModel,
+		})
+		local pLight = Instance.new("PointLight")
+		pLight.Color = Color3.fromRGB(255, 240, 210)
+		pLight.Range = 35
+		pLight.Brightness = 2.5
+		pLight.Parent = lightFixture
+
+		-- Driveway apron connecting garage directly into crescent plaza
+		makePart({
+			Name = "GarageApron",
+			Size = Vector3.new(gw, 0.4, 20),
+			CFrame = garageCF * CFrame.new(0, 0.8, gd / 2 + 10),
+			Color = Color3.fromRGB(50, 52, 60),
+			Material = Enum.Material.Concrete,
+			CanCollide = true,
+			Parent = gModel,
+		})
+	end
+
+	-- Restoration Garage Workshop (Positioned on the right wing of the crescent)
+	local garageCF = CFrame.new(88, 1.5, 120) * CFrame.Angles(0, math.rad(-30), 0)
+	makePart({
+		Name = "WorkshopBuilding",
+		Size = Vector3.new(46, 18, 54),
+		CFrame = garageCF * CFrame.new(0, 9, 0),
+		Color = Color3.fromRGB(62, 66, 76),
+		Material = Enum.Material.Concrete,
+		CanCollide = true,
+		Parent = crescentFolder,
+	})
+
+	-- Workshop Sign
+	local wSign = makePart({
+		Name = "WorkshopSign",
+		Size = Vector3.new(32, 4, 1.2),
+		CFrame = garageCF * CFrame.new(0, 20, 26),
+		Color = Color3.fromRGB(255, 140, 0),
+		Material = Enum.Material.Neon,
+		Parent = crescentFolder,
+	})
+	local wGui = Instance.new("SurfaceGui")
+	wGui.Name = "WorkshopGui"
+	wGui.Face = Enum.NormalId.Front
+	wGui.CanvasSize = Vector2.new(600, 80)
+	wGui.Parent = wSign
+	local wLabel = Instance.new("TextLabel")
+	wLabel.Size = UDim2.fromScale(1, 1)
+	wLabel.BackgroundTransparency = 1
+	wLabel.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
+	wLabel.Text = "★ RESTORATION WORKSHOP ★"
+	wLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	wLabel.TextSize = 26
+	wLabel.Parent = wGui
+
+	-- Garage Drop-Off Pad (Tagged `GarageDropOff` for BarnService)
+	local dropOffPad = makePart({
+		Name = "GarageDropOffZone",
+		Size = Vector3.new(24, 0.4, 26),
+		CFrame = CFrame.new(85, 1.4, 140),
+		Color = Color3.fromRGB(255, 140, 0),
+		Material = Enum.Material.Neon,
+		CanCollide = false,
+		Parent = crescentFolder,
+	})
+	CollectionService:AddTag(dropOffPad, DROP_OFF_TAG)
+
+	-- Chevron caution floor markings
+	for s = -8, 8, 4 do
+		makePart({
+			Name = "DropOffStripe",
+			Size = Vector3.new(18, 0.08, 1.8),
+			CFrame = CFrame.new(85, 1.62, 140 + s) * CFrame.Angles(0, math.rad(25), 0),
+			Color = Color3.fromRGB(20, 20, 22),
+			Material = Enum.Material.SmoothPlastic,
+			CanCollide = false,
+			Parent = crescentFolder,
+		})
+	end
+end
+
+-- ============================================================================
+-- 3. LINEAR STRAIGHT HIGHWAY (STARTS AT MERGE Z = 250, EXTENDS TO Z = 4600)
+-- ============================================================================
+
+local function generateStraightHighway(mapFolder: Folder)
+	local hwFolder = Instance.new("Folder")
+	hwFolder.Name = "LinearHighway"
+	hwFolder.Parent = mapFolder
+
+	local hw = WorldConfig.Highway
+	local roadLength = hw.EndZ - hw.StartZ
+	local centerZ = (hw.StartZ + hw.EndZ) / 2
+	local roadY = hw.RoadY
+
+	-- Main 4-Lane Asphalt Roadbed (Begins at Z = 250, runs linearly down +Z)
+	makePart({
+		Name = "HighwayAsphalt",
+		Size = Vector3.new(hw.LaneWidth * hw.NumLanes, 2, roadLength),
+		CFrame = CFrame.new(0, roadY, centerZ),
+		Color = hw.AsphaltColor,
+		Material = Enum.Material.Concrete,
+		CanCollide = true,
+		Parent = hwFolder,
+	})
+
+	-- Shoulders
+	local shoulderOffset = (hw.LaneWidth * hw.NumLanes) / 2 + hw.ShoulderWidth / 2
+	makePart({
+		Name = "Shoulder_West",
+		Size = Vector3.new(hw.ShoulderWidth, 2.1, roadLength),
+		CFrame = CFrame.new(-shoulderOffset, roadY + 0.05, centerZ),
+		Color = hw.ShoulderColor,
+		Material = Enum.Material.Pavement,
+		CanCollide = true,
+		Parent = hwFolder,
+	})
+	makePart({
+		Name = "Shoulder_East",
+		Size = Vector3.new(hw.ShoulderWidth, 2.1, roadLength),
+		CFrame = CFrame.new(shoulderOffset, roadY + 0.05, centerZ),
+		Color = hw.ShoulderColor,
+		Material = Enum.Material.Pavement,
+		CanCollide = true,
+		Parent = hwFolder,
+	})
+
+	-- Double Solid Yellow Centerline
+	makePart({
+		Name = "Centerline_Left",
+		Size = Vector3.new(0.8, 0.08, roadLength),
+		CFrame = CFrame.new(-0.6, roadY + 1.05, centerZ),
+		Color = hw.CenterlineColor,
+		Material = Enum.Material.Neon,
+		CanCollide = false,
+		Parent = hwFolder,
+	})
+	makePart({
+		Name = "Centerline_Right",
+		Size = Vector3.new(0.8, 0.08, roadLength),
+		CFrame = CFrame.new(0.6, roadY + 1.05, centerZ),
+		Color = hw.CenterlineColor,
+		Material = Enum.Material.Neon,
+		CanCollide = false,
+		Parent = hwFolder,
+	})
+
+	-- Outer Fog Lines (Solid White)
+	local fogLineOffset = (hw.LaneWidth * hw.NumLanes) / 2
+	makePart({
+		Name = "FogLine_West",
+		Size = Vector3.new(0.8, 0.08, roadLength),
+		CFrame = CFrame.new(-fogLineOffset, roadY + 1.05, centerZ),
+		Color = hw.LaneDividerColor,
+		Material = Enum.Material.SmoothPlastic,
+		CanCollide = false,
+		Parent = hwFolder,
+	})
+	makePart({
+		Name = "FogLine_East",
+		Size = Vector3.new(0.8, 0.08, roadLength),
+		CFrame = CFrame.new(fogLineOffset, roadY + 1.05, centerZ),
+		Color = hw.LaneDividerColor,
+		Material = Enum.Material.SmoothPlastic,
+		CanCollide = false,
+		Parent = hwFolder,
+	})
+
+	-- Dashed White Lane Dividers
+	local dashLength = 14
+	local dashGap = 16
+	local step = dashLength + dashGap
+	local dividerOffsets = { -hw.LaneWidth, hw.LaneWidth }
+
+	for _, xOff in dividerOffsets do
+		local z = hw.StartZ + dashLength / 2
+		while z < hw.EndZ do
+			makePart({
+				Name = "LaneDash",
+				Size = Vector3.new(0.8, 0.08, dashLength),
+				CFrame = CFrame.new(xOff, roadY + 1.05, z),
+				Color = hw.LaneDividerColor,
+				Material = Enum.Material.SmoothPlastic,
+				CanCollide = false,
+				Parent = hwFolder,
+			})
+			z += step
+		end
+	end
+
+	-- Continuous Steel Guardrails along Outer Edges
+	local guardrailOffset = hw.Width / 2 + 1
+	local railSegmentLength = 200
+	local numRailSegments = math.ceil(roadLength / railSegmentLength)
+
+	for i = 1, numRailSegments do
+		local segZ = hw.StartZ + (i - 0.5) * railSegmentLength
+		makePart({
+			Name = "Guardrail_West",
+			Size = Vector3.new(1.4, 3.8, railSegmentLength),
+			CFrame = CFrame.new(-guardrailOffset, roadY + 2.8, segZ),
+			Color = hw.GuardrailColor,
+			Material = Enum.Material.Metal,
+			CanCollide = true,
+			Parent = hwFolder,
+		})
+		makePart({
+			Name = "Guardrail_East",
+			Size = Vector3.new(1.4, 3.8, railSegmentLength),
+			CFrame = CFrame.new(guardrailOffset, roadY + 2.8, segZ),
+			Color = hw.GuardrailColor,
+			Material = Enum.Material.Metal,
+			CanCollide = true,
+			Parent = hwFolder,
+		})
+	end
+
+	-- Highway Streetlights (Every 140 studs)
+	local lightZ = hw.StartZ + 40
+	while lightZ < hw.EndZ do
+		local side = if (math.floor(lightZ / hw.StreetlightInterval) % 2 == 0) then -1 else 1
+		local poleX = side * (hw.Width / 2 + 3)
+
+		makePart({
+			Name = "HighwayLightPole",
+			Size = Vector3.new(1.6, hw.StreetlightHeight, 1.6),
+			CFrame = CFrame.new(poleX, roadY + hw.StreetlightHeight / 2, lightZ),
+			Color = Color3.fromRGB(60, 64, 72),
+			Material = Enum.Material.Metal,
+			CanCollide = true,
+			Parent = hwFolder,
+		})
+
+		makePart({
+			Name = "LightArm",
+			Size = Vector3.new(14, 1.2, 1.2),
+			CFrame = CFrame.new(poleX - side * 7, roadY + hw.StreetlightHeight - 0.6, lightZ),
+			Color = Color3.fromRGB(60, 64, 72),
+			Material = Enum.Material.Metal,
+			CanCollide = false,
+			Parent = hwFolder,
+		})
+
+		local fixture = makePart({
+			Name = "Luminaire",
+			Size = Vector3.new(3, 1, 2),
+			CFrame = CFrame.new(poleX - side * 13, roadY + hw.StreetlightHeight - 1.2, lightZ),
+			Color = Color3.fromRGB(255, 245, 210),
+			Material = Enum.Material.Neon,
+			CanCollide = false,
+			Parent = hwFolder,
+		})
+
+		local light = Instance.new("PointLight")
+		light.Brightness = 2.5
+		light.Range = 65
+		light.Color = Color3.fromRGB(255, 240, 200)
+		light.Parent = fixture
+
+		lightZ += hw.StreetlightInterval
+	end
+
+	-- Linear Run Milestone Gantries
+	local milestones = {
+		{ Z = 320, Text = "⚡ START OF RUN // AUTUMN REDWOOD VALLEY" },
+		{ Z = 1400, Text = "🏜️ MILE 1 // RED ROCK DESERT CANYON" },
+		{ Z = 2500, Text = "🌲 MILE 2 // ALPINE PINE SUMMIT" },
+		{ Z = 3600, Text = "❄️ MILE 3 // GLACIAL TUNDRA PEAKS" },
+		{ Z = 4550, Text = "🏁 FINISH LINE // SUMMIT TERMINUS 🏁" },
+	}
+
+	for _, mile in milestones do
+		local gHeight = 24
+		makePart({
+			Name = "MileGantry_W",
+			Size = Vector3.new(2.4, gHeight, 2.4),
+			CFrame = CFrame.new(-hw.Width / 2 - 2, roadY + gHeight / 2, mile.Z),
+			Color = Color3.fromRGB(50, 54, 62),
+			Material = Enum.Material.Metal,
+			CanCollide = true,
+			Parent = hwFolder,
+		})
+		makePart({
+			Name = "MileGantry_E",
+			Size = Vector3.new(2.4, gHeight, 2.4),
+			CFrame = CFrame.new(hw.Width / 2 + 2, roadY + gHeight / 2, mile.Z),
+			Color = Color3.fromRGB(50, 54, 62),
+			Material = Enum.Material.Metal,
+			CanCollide = true,
+			Parent = hwFolder,
+		})
+		makePart({
+			Name = "MileGantry_Beam",
+			Size = Vector3.new(hw.Width + 4, 3, 2.4),
+			CFrame = CFrame.new(0, roadY + gHeight - 1.5, mile.Z),
+			Color = Color3.fromRGB(50, 54, 62),
+			Material = Enum.Material.Metal,
+			CanCollide = false,
+			Parent = hwFolder,
+		})
+
+		local sBoard = makePart({
+			Name = "MileSignBoard",
+			Size = Vector3.new(50, 7, 1),
+			CFrame = CFrame.new(0, roadY + gHeight - 4, mile.Z),
+			Color = Color3.fromRGB(20, 95, 50),
+			Material = Enum.Material.SmoothPlastic,
+			CanCollide = false,
+			Parent = hwFolder,
+		})
+		local sGui = Instance.new("SurfaceGui")
+		sGui.Name = "SignGui"
+		sGui.Face = Enum.NormalId.Front
+		sGui.CanvasSize = Vector2.new(850, 120)
+		sGui.LightInfluence = 0.2
+		sGui.Parent = sBoard
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.fromScale(1, 1)
+		label.BackgroundTransparency = 1
+		label.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
+		label.Text = mile.Text
+		label.TextColor3 = Color3.fromRGB(255, 255, 255)
+		label.TextSize = 30
+		label.Parent = sGui
+	end
+end
+
+-- ============================================================================
+-- 4. OVERSIZED FOLIAGE & PROPS (LINEAR BIOME STRETCHES)
 -- ============================================================================
 
 local function makeGiantPineTree(position: Vector3, parent: Instance, isSnowy: boolean?)
 	local trunkHeight = rng:NextNumber(18, 26)
 	local trunkRadius = WorldConfig.EnvironmentScale.TreeTrunkRadius
-	local trunk = makePart({
+	makePart({
 		Name = "PineTrunk",
 		Shape = Enum.PartType.Cylinder,
 		Size = Vector3.new(trunkHeight, trunkRadius * 2, trunkRadius * 2),
 		CFrame = CFrame.new(position + Vector3.new(0, trunkHeight / 2, 0)) * CFrame.Angles(0, 0, math.rad(90)),
 		Color = Color3.fromRGB(86, 54, 34),
 		Material = Enum.Material.Wood,
+		CanCollide = true,
 		Parent = parent,
 	})
 
@@ -193,6 +745,7 @@ local function makeGiantPineTree(position: Vector3, parent: Instance, isSnowy: b
 			CFrame = CFrame.new(position + Vector3.new(0, yOffset + tierHeight / 2, 0)) * CFrame.Angles(0, math.rad(rng:NextNumber(0, 45)), 0),
 			Color = foliageColor,
 			Material = if isSnowy then Enum.Material.Snow else Enum.Material.Grass,
+			CanCollide = false,
 			Parent = parent,
 		})
 	end
@@ -208,10 +761,10 @@ local function makeGiantRedwoodTree(position: Vector3, parent: Instance)
 		CFrame = CFrame.new(position + Vector3.new(0, trunkHeight / 2, 0)) * CFrame.Angles(0, 0, math.rad(90)),
 		Color = Color3.fromRGB(115, 62, 38),
 		Material = Enum.Material.Wood,
+		CanCollide = true,
 		Parent = parent,
 	})
 
-	-- Massive layered autumn canopy
 	local canopySpread = rng:NextNumber(36, 50)
 	local canopyHeight = rng:NextNumber(22, 30)
 	local autumnColors = {
@@ -227,6 +780,7 @@ local function makeGiantRedwoodTree(position: Vector3, parent: Instance)
 		CFrame = CFrame.new(position + Vector3.new(0, trunkHeight + canopyHeight / 2 - 4, 0)) * CFrame.Angles(0, math.rad(rng:NextNumber(0, 60)), 0),
 		Color = color,
 		Material = Enum.Material.Grass,
+		CanCollide = false,
 		Parent = parent,
 	})
 end
@@ -236,7 +790,6 @@ local function makeGiantSaguaroCactus(position: Vector3, parent: Instance)
 	local radius = 3.2
 	local cactusColor = Color3.fromRGB(58, 120, 65)
 
-	-- Main trunk
 	makePart({
 		Name = "CactusTrunk",
 		Shape = Enum.PartType.Cylinder,
@@ -244,10 +797,10 @@ local function makeGiantSaguaroCactus(position: Vector3, parent: Instance)
 		CFrame = CFrame.new(position + Vector3.new(0, height / 2, 0)) * CFrame.Angles(0, 0, math.rad(90)),
 		Color = cactusColor,
 		Material = Enum.Material.SmoothPlastic,
+		CanCollide = true,
 		Parent = parent,
 	})
 
-	-- Left arm
 	local leftArmY = height * 0.45
 	makePart({
 		Name = "CactusArmH_L",
@@ -255,6 +808,7 @@ local function makeGiantSaguaroCactus(position: Vector3, parent: Instance)
 		CFrame = CFrame.new(position + Vector3.new(-7, leftArmY, 0)),
 		Color = cactusColor,
 		Material = Enum.Material.SmoothPlastic,
+		CanCollide = true,
 		Parent = parent,
 	})
 	makePart({
@@ -264,10 +818,10 @@ local function makeGiantSaguaroCactus(position: Vector3, parent: Instance)
 		CFrame = CFrame.new(position + Vector3.new(-12, leftArmY + 8, 0)) * CFrame.Angles(0, 0, math.rad(90)),
 		Color = cactusColor,
 		Material = Enum.Material.SmoothPlastic,
+		CanCollide = true,
 		Parent = parent,
 	})
 
-	-- Right arm
 	local rightArmY = height * 0.6
 	makePart({
 		Name = "CactusArmH_R",
@@ -275,6 +829,7 @@ local function makeGiantSaguaroCactus(position: Vector3, parent: Instance)
 		CFrame = CFrame.new(position + Vector3.new(7, rightArmY, 0)),
 		Color = cactusColor,
 		Material = Enum.Material.SmoothPlastic,
+		CanCollide = true,
 		Parent = parent,
 	})
 	makePart({
@@ -284,6 +839,7 @@ local function makeGiantSaguaroCactus(position: Vector3, parent: Instance)
 		CFrame = CFrame.new(position + Vector3.new(12, rightArmY + 8, 0)) * CFrame.Angles(0, 0, math.rad(90)),
 		Color = cactusColor,
 		Material = Enum.Material.SmoothPlastic,
+		CanCollide = true,
 		Parent = parent,
 	})
 end
@@ -305,6 +861,7 @@ local function makeGiantBoulder(position: Vector3, parent: Instance, color: Colo
 		),
 		Color = color,
 		Material = Enum.Material.Rock,
+		CanCollide = true,
 		Parent = parent,
 	})
 end
@@ -323,6 +880,7 @@ local function makeFrostSpire(position: Vector3, parent: Instance)
 		Color = Color3.fromRGB(180, 225, 245),
 		Material = Enum.Material.Ice,
 		Transparency = 0.15,
+		CanCollide = true,
 		Parent = parent,
 	})
 end
@@ -333,16 +891,15 @@ local function generateBiomeFoliage(mapFolder: Folder)
 	foliageFolder.Parent = mapFolder
 
 	for biomeKey, biome in WorldConfig.Biomes do
-		if biomeKey == "CentralHub" then
+		if biomeKey == "CrescentHub" then
 			continue
 		end
 
-		local count = 28 -- Number of giant environmental props per biome
+		local count = 28
 		for _ = 1, count do
-			-- Distribute outside the highway corridor (|X| >= 65)
 			local side = if rng:NextNumber() > 0.5 then 1 else -1
-			local propX = side * rng:NextNumber(70, 360)
-			local propZ = rng:NextNumber(biome.MinZ + 30, biome.MaxZ - 30)
+			local propX = side * rng:NextNumber(68, 380)
+			local propZ = rng:NextNumber(biome.MinZ + 40, biome.MaxZ - 40)
 			local pos = Vector3.new(propX, WorldConfig.WorldBounds.GroundY, propZ)
 
 			if biome.FoliageType == "AlpinePine" then
@@ -371,254 +928,7 @@ local function generateBiomeFoliage(mapFolder: Folder)
 end
 
 -- ============================================================================
--- 3. STRAIGHT HIGHWAY SYSTEM WITH INFRASTRUCTURE
--- ============================================================================
-
-local function generateStraightHighway(mapFolder: Folder)
-	local hwFolder = Instance.new("Folder")
-	hwFolder.Name = "StraightHighway"
-	hwFolder.Parent = mapFolder
-
-	local hw = WorldConfig.Highway
-	local roadLength = hw.EndZ - hw.StartZ
-	local centerZ = (hw.StartZ + hw.EndZ) / 2
-	local roadY = hw.RoadY
-
-	-- Main 4-Lane Asphalt Roadbed
-	local asphalt = makePart({
-		Name = "HighwayAsphalt",
-		Size = Vector3.new(hw.LaneWidth * hw.NumLanes, 1, roadLength),
-		CFrame = CFrame.new(0, roadY, centerZ),
-		Color = hw.AsphaltColor,
-		Material = Enum.Material.Concrete,
-		Parent = hwFolder,
-	})
-
-	-- Left and Right Shoulders
-	local shoulderOffset = (hw.LaneWidth * hw.NumLanes) / 2 + hw.ShoulderWidth / 2
-	makePart({
-		Name = "Shoulder_West",
-		Size = Vector3.new(hw.ShoulderWidth, 1.1, roadLength),
-		CFrame = CFrame.new(-shoulderOffset, roadY + 0.05, centerZ),
-		Color = hw.ShoulderColor,
-		Material = Enum.Material.Pavement,
-		Parent = hwFolder,
-	})
-	makePart({
-		Name = "Shoulder_East",
-		Size = Vector3.new(hw.ShoulderWidth, 1.1, roadLength),
-		CFrame = CFrame.new(shoulderOffset, roadY + 0.05, centerZ),
-		Color = hw.ShoulderColor,
-		Material = Enum.Material.Pavement,
-		Parent = hwFolder,
-	})
-
-	-- Double Solid Yellow Centerline
-	makePart({
-		Name = "Centerline_Left",
-		Size = Vector3.new(0.8, 0.05, roadLength),
-		CFrame = CFrame.new(-0.6, roadY + 0.52, centerZ),
-		Color = hw.CenterlineColor,
-		Material = Enum.Material.Neon,
-		Parent = hwFolder,
-	})
-	makePart({
-		Name = "Centerline_Right",
-		Size = Vector3.new(0.8, 0.05, roadLength),
-		CFrame = CFrame.new(0.6, roadY + 0.52, centerZ),
-		Color = hw.CenterlineColor,
-		Material = Enum.Material.Neon,
-		Parent = hwFolder,
-	})
-
-	-- Outer Fog Lines (White)
-	local fogLineOffset = (hw.LaneWidth * hw.NumLanes) / 2
-	makePart({
-		Name = "FogLine_West",
-		Size = Vector3.new(0.8, 0.05, roadLength),
-		CFrame = CFrame.new(-fogLineOffset, roadY + 0.52, centerZ),
-		Color = hw.LaneDividerColor,
-		Material = Enum.Material.SmoothPlastic,
-		Parent = hwFolder,
-	})
-	makePart({
-		Name = "FogLine_East",
-		Size = Vector3.new(0.8, 0.05, roadLength),
-		CFrame = CFrame.new(fogLineOffset, roadY + 0.52, centerZ),
-		Color = hw.LaneDividerColor,
-		Material = Enum.Material.SmoothPlastic,
-		Parent = hwFolder,
-	})
-
-	-- Dashed White Lane Dividers
-	local dashLength = 14
-	local dashGap = 16
-	local step = dashLength + dashGap
-	local dividerOffsets = { -hw.LaneWidth, hw.LaneWidth }
-
-	for _, xOff in dividerOffsets do
-		local z = hw.StartZ + dashLength / 2
-		while z < hw.EndZ do
-			makePart({
-				Name = "LaneDash",
-				Size = Vector3.new(0.8, 0.05, dashLength),
-				CFrame = CFrame.new(xOff, roadY + 0.52, z),
-				Color = hw.LaneDividerColor,
-				Material = Enum.Material.SmoothPlastic,
-				Parent = hwFolder,
-			})
-			z += step
-		end
-	end
-
-	-- Outer Steel Guardrails (Collidable to keep players safely on the roadway)
-	local guardrailOffset = hw.Width / 2 + 1
-	local railSegmentLength = 200
-	local numRailSegments = math.ceil(roadLength / railSegmentLength)
-
-	for i = 1, numRailSegments do
-		local segZ = hw.StartZ + (i - 0.5) * railSegmentLength
-		-- West Guardrail
-		makePart({
-			Name = "Guardrail_West",
-			Size = Vector3.new(1.4, 3.5, railSegmentLength),
-			CFrame = CFrame.new(-guardrailOffset, roadY + 2.25, segZ),
-			Color = hw.GuardrailColor,
-			Material = Enum.Material.Metal,
-			Parent = hwFolder,
-		})
-		-- East Guardrail
-		makePart({
-			Name = "Guardrail_East",
-			Size = Vector3.new(1.4, 3.5, railSegmentLength),
-			CFrame = CFrame.new(guardrailOffset, roadY + 2.25, segZ),
-			Color = hw.GuardrailColor,
-			Material = Enum.Material.Metal,
-			Parent = hwFolder,
-		})
-	end
-
-	-- Highway Streetlights
-	local lightZ = hw.StartZ + 60
-	while lightZ < hw.EndZ do
-		-- Alternate left and right side
-		local side = if (math.floor(lightZ / hw.StreetlightInterval) % 2 == 0) then -1 else 1
-		local poleX = side * (hw.Width / 2 + 3)
-
-		local pole = makePart({
-			Name = "HighwayLightPole",
-			Size = Vector3.new(1.6, hw.StreetlightHeight, 1.6),
-			CFrame = CFrame.new(poleX, roadY + hw.StreetlightHeight / 2, lightZ),
-			Color = Color3.fromRGB(60, 64, 72),
-			Material = Enum.Material.Metal,
-			Parent = hwFolder,
-		})
-
-		-- Cantilever arm extending towards road
-		makePart({
-			Name = "LightArm",
-			Size = Vector3.new(14, 1.2, 1.2),
-			CFrame = CFrame.new(poleX - side * 7, roadY + hw.StreetlightHeight - 0.6, lightZ),
-			Color = Color3.fromRGB(60, 64, 72),
-			Material = Enum.Material.Metal,
-			Parent = hwFolder,
-		})
-
-		-- Luminaire fixture with PointLight
-		local fixture = makePart({
-			Name = "Luminaire",
-			Size = Vector3.new(3, 1, 2),
-			CFrame = CFrame.new(poleX - side * 13, roadY + hw.StreetlightHeight - 1.2, lightZ),
-			Color = Color3.fromRGB(255, 245, 210),
-			Material = Enum.Material.Neon,
-			Parent = hwFolder,
-		})
-
-		local light = Instance.new("PointLight")
-		light.Brightness = 2.5
-		light.Range = 60
-		light.Color = Color3.fromRGB(255, 240, 200)
-		light.Parent = fixture
-
-		lightZ += hw.StreetlightInterval
-	end
-
-	-- Overhead Highway Sign Gantries
-	local gantryZ = hw.StartZ + 250
-	local gantrySigns = {
-		"❄️ GLACIER PASS - NORTH TERMINUS",
-		"🍁 AUTUMN REDWOOD VALLEY - SCENIC OVERLOOK",
-		"🏎️ CENTRAL MOTORS - RESTORATION GARAGE & SPAWNS",
-		"🏜️ RED ROCK DESERT - HIGHWAY 66 EXPRESS",
-		"🌲 ALPINE PASS - MOUNTAIN SUMMIT",
-	}
-	local signIdx = 1
-
-	while gantryZ < hw.EndZ do
-		local gantryHeight = 22
-		-- Support towers
-		makePart({
-			Name = "GantryTower_W",
-			Size = Vector3.new(2.4, gantryHeight, 2.4),
-			CFrame = CFrame.new(-hw.Width / 2 - 2, roadY + gantryHeight / 2, gantryZ),
-			Color = Color3.fromRGB(50, 54, 62),
-			Material = Enum.Material.Metal,
-			Parent = hwFolder,
-		})
-		makePart({
-			Name = "GantryTower_E",
-			Size = Vector3.new(2.4, gantryHeight, 2.4),
-			CFrame = CFrame.new(hw.Width / 2 + 2, roadY + gantryHeight / 2, gantryZ),
-			Color = Color3.fromRGB(50, 54, 62),
-			Material = Enum.Material.Metal,
-			Parent = hwFolder,
-		})
-
-		-- Overhead span
-		makePart({
-			Name = "GantryBeam",
-			Size = Vector3.new(hw.Width + 4, 3, 2.4),
-			CFrame = CFrame.new(0, roadY + gantryHeight - 1.5, gantryZ),
-			Color = Color3.fromRGB(50, 54, 62),
-			Material = Enum.Material.Metal,
-			Parent = hwFolder,
-		})
-
-		-- Sign Board
-		local signText = gantrySigns[((signIdx - 1) % #gantrySigns) + 1]
-		local signBoard = makePart({
-			Name = "HighwaySignBoard",
-			Size = Vector3.new(46, 7, 1),
-			CFrame = CFrame.new(0, roadY + gantryHeight - 4, gantryZ),
-			Color = Color3.fromRGB(18, 90, 48),
-			Material = Enum.Material.SmoothPlastic,
-			Parent = hwFolder,
-		})
-
-		local sGui = Instance.new("SurfaceGui")
-		sGui.Name = "SignGui"
-		sGui.Face = Enum.NormalId.Back
-		sGui.CanvasSize = Vector2.new(800, 120)
-		sGui.LightInfluence = 0.2
-		sGui.Parent = signBoard
-
-		local label = Instance.new("TextLabel")
-		label.Size = UDim2.fromScale(1, 1)
-		label.BackgroundTransparency = 1
-		label.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
-		label.Text = signText
-		label.TextColor3 = Color3.fromRGB(255, 255, 255)
-		label.TextSize = 34
-		label.TextScaled = true
-		label.Parent = sGui
-
-		signIdx += 1
-		gantryZ += hw.SignGantryInterval
-	end
-end
-
--- ============================================================================
--- 4. RANDOMLY GENERATED HIGHWAY OBSTACLES (SLALOM & DODGING COURSES)
+-- 5. RANDOMLY GENERATED HIGHWAY OBSTACLES (SLALOM & EVASION LANES)
 -- ============================================================================
 
 local function spawnObstacleJerseyBarricade(parent: Instance, cframe: CFrame)
@@ -628,20 +938,20 @@ local function spawnObstacleJerseyBarricade(parent: Instance, cframe: CFrame)
 		CFrame = cframe * CFrame.new(0, 2.5, 0),
 		Color = Color3.fromRGB(225, 120, 30),
 		Material = Enum.Material.Concrete,
+		CanCollide = true,
 		Parent = parent,
 	})
 
-	-- Reflective caution stripes
-	local stripe = makePart({
+	makePart({
 		Name = "CautionStripe",
 		Size = Vector3.new(18.2, 1.2, 3.6),
 		CFrame = barrier.CFrame,
 		Color = Color3.fromRGB(245, 245, 245),
 		Material = Enum.Material.SmoothPlastic,
+		CanCollide = false,
 		Parent = parent,
 	})
 
-	-- Flashing amber beacon light on top
 	local beacon = makePart({
 		Name = "HazardBeacon",
 		Shape = Enum.PartType.Cylinder,
@@ -649,6 +959,7 @@ local function spawnObstacleJerseyBarricade(parent: Instance, cframe: CFrame)
 		CFrame = barrier.CFrame * CFrame.new(0, 3.2, 0) * CFrame.Angles(0, 0, math.rad(90)),
 		Color = Color3.fromRGB(255, 160, 0),
 		Material = Enum.Material.Neon,
+		CanCollide = false,
 		Parent = parent,
 	})
 	local light = Instance.new("PointLight")
@@ -659,37 +970,37 @@ local function spawnObstacleJerseyBarricade(parent: Instance, cframe: CFrame)
 end
 
 local function spawnObstacleCargoCrates(parent: Instance, cframe: CFrame)
-	-- Stack of wooden shipping crates
 	makePart({
 		Name = "CargoCrate_Large",
 		Size = Vector3.new(10, 8, 10),
 		CFrame = cframe * CFrame.new(0, 4, 0),
 		Color = Color3.fromRGB(140, 95, 55),
 		Material = Enum.Material.Wood,
+		CanCollide = true,
 		Parent = parent,
 	})
-
 	makePart({
 		Name = "CargoCrate_Small",
 		Size = Vector3.new(6, 6, 6),
 		CFrame = cframe * CFrame.new(5, 3, 2),
 		Color = Color3.fromRGB(160, 110, 65),
 		Material = Enum.Material.Wood,
+		CanCollide = true,
 		Parent = parent,
 	})
 end
 
 local function spawnObstacleWreckedChassis(parent: Instance, cframe: CFrame)
-	local chassis = makePart({
+	makePart({
 		Name = "WreckedChassis",
 		Size = Vector3.new(8, 4.5, 16),
 		CFrame = cframe * CFrame.new(0, 2.25, 0) * CFrame.Angles(0, math.rad(rng:NextNumber(-25, 25)), 0),
 		Color = Color3.fromRGB(68, 38, 28),
 		Material = Enum.Material.CorrodedMetal,
+		CanCollide = true,
 		Parent = parent,
 	})
 
-	-- Road hazard flare
 	local flare = makePart({
 		Name = "RoadFlare",
 		Shape = Enum.PartType.Cylinder,
@@ -697,6 +1008,7 @@ local function spawnObstacleWreckedChassis(parent: Instance, cframe: CFrame)
 		CFrame = cframe * CFrame.new(7, 0.4, 4) * CFrame.Angles(0, 0, math.rad(90)),
 		Color = Color3.fromRGB(255, 60, 30),
 		Material = Enum.Material.Neon,
+		CanCollide = false,
 		Parent = parent,
 	})
 	local light = Instance.new("PointLight")
@@ -713,16 +1025,16 @@ local function spawnObstacleTireWall(parent: Instance, cframe: CFrame)
 		CFrame = cframe * CFrame.new(0, 2.25, 0),
 		Color = Color3.fromRGB(30, 32, 35),
 		Material = Enum.Material.SmoothPlastic,
+		CanCollide = true,
 		Parent = parent,
 	})
-
-	-- High-visibility yellow impact bumper
 	makePart({
 		Name = "TireBumper",
 		Size = Vector3.new(16.2, 1.4, 5.2),
 		CFrame = wall.CFrame,
 		Color = Color3.fromRGB(255, 204, 0),
 		Material = Enum.Material.Neon,
+		CanCollide = false,
 		Parent = parent,
 	})
 end
@@ -733,29 +1045,26 @@ local function generateHighwayObstacles(mapFolder: Folder)
 	obstacleFolder.Parent = mapFolder
 
 	local hw = WorldConfig.Highway
-	-- Lane centers: Lane 1 (-21), Lane 2 (-7), Lane 3 (+7), Lane 4 (+21)
 	local laneCenters = { -21, -7, 7, 21 }
 
-	local currentZ = hw.StartZ + 160
-	while currentZ < hw.EndZ - 160 do
-		-- Keep central plaza (Z: -250 to 250) clear for clean spawns and showroom access
-		if math.abs(currentZ) > 280 then
-			-- Pick 1 or 2 lanes to block, leaving at least 2 clear lanes for driving
-			local blockedLaneIdx = rng:NextInteger(1, #laneCenters)
-			local targetX = laneCenters[blockedLaneIdx]
+	-- Obstacles begin past the merge on-ramp (Z >= 420) and continue down the linear highway
+	local currentZ = hw.StartZ + 180
+	while currentZ < hw.EndZ - 150 do
+		-- Pick 1 or 2 lanes to block, always guaranteeing at least 2 clear lanes for driving
+		local blockedLaneIdx = rng:NextInteger(1, #laneCenters)
+		local targetX = laneCenters[blockedLaneIdx]
 
-			local obstacleRoll = rng:NextInteger(1, 4)
-			local cf = CFrame.new(targetX, hw.RoadY, currentZ)
+		local obstacleRoll = rng:NextInteger(1, 4)
+		local cf = CFrame.new(targetX, hw.RoadY, currentZ)
 
-			if obstacleRoll == 1 then
-				spawnObstacleJerseyBarricade(obstacleFolder, cf)
-			elseif obstacleRoll == 2 then
-				spawnObstacleCargoCrates(obstacleFolder, cf)
-			elseif obstacleRoll == 3 then
-				spawnObstacleWreckedChassis(obstacleFolder, cf)
-			else
-				spawnObstacleTireWall(obstacleFolder, cf)
-			end
+		if obstacleRoll == 1 then
+			spawnObstacleJerseyBarricade(obstacleFolder, cf)
+		elseif obstacleRoll == 2 then
+			spawnObstacleCargoCrates(obstacleFolder, cf)
+		elseif obstacleRoll == 3 then
+			spawnObstacleWreckedChassis(obstacleFolder, cf)
+		else
+			spawnObstacleTireWall(obstacleFolder, cf)
 		end
 
 		currentZ += rng:NextNumber(WorldConfig.ObstacleIntervalMin, WorldConfig.ObstacleIntervalMax)
@@ -763,7 +1072,7 @@ local function generateHighwayObstacles(mapFolder: Folder)
 end
 
 -- ============================================================================
--- 5. BARNS & CENTRAL RESTORATION GARAGE (TAGGED FOR GAMEPLAY)
+-- 6. RUSTIC BARNS (ALONG THE LINEAR HIGHWAY)
 -- ============================================================================
 
 local function buildRusticBarn(position: Vector3, headingDeg: number, carId: string, parent: Instance)
@@ -774,53 +1083,53 @@ local function buildRusticBarn(position: Vector3, headingDeg: number, carId: str
 	local barnCF = CFrame.new(position) * CFrame.Angles(0, math.rad(headingDeg), 0)
 	local width, length, height = 36, 48, 24
 
-	-- Barn Foundation / Floor
 	makePart({
 		Name = "BarnFloor",
 		Size = Vector3.new(width, 1, length),
 		CFrame = barnCF * CFrame.new(0, 0.5, 0),
 		Color = Color3.fromRGB(65, 48, 36),
 		Material = Enum.Material.WoodPlanks,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 
-	-- Back Wall
 	makePart({
 		Name = "BackWall",
 		Size = Vector3.new(width, height, 2),
 		CFrame = barnCF * CFrame.new(0, height / 2 + 1, -length / 2 + 1),
 		Color = Color3.fromRGB(120, 42, 34),
 		Material = Enum.Material.WoodPlanks,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 
-	-- Left Wall
 	makePart({
 		Name = "LeftWall",
 		Size = Vector3.new(2, height, length),
 		CFrame = barnCF * CFrame.new(-width / 2 + 1, height / 2 + 1, 0),
 		Color = Color3.fromRGB(120, 42, 34),
 		Material = Enum.Material.WoodPlanks,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 
-	-- Right Wall
 	makePart({
 		Name = "RightWall",
 		Size = Vector3.new(2, height, length),
 		CFrame = barnCF * CFrame.new(width / 2 - 1, height / 2 + 1, 0),
 		Color = Color3.fromRGB(120, 42, 34),
 		Material = Enum.Material.WoodPlanks,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 
-	-- Front Doorway Pillars
 	makePart({
 		Name = "FrontLeftPillar",
 		Size = Vector3.new(10, height, 2),
 		CFrame = barnCF * CFrame.new(-width / 2 + 5, height / 2 + 1, length / 2 - 1),
 		Color = Color3.fromRGB(120, 42, 34),
 		Material = Enum.Material.WoodPlanks,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 	makePart({
@@ -829,17 +1138,17 @@ local function buildRusticBarn(position: Vector3, headingDeg: number, carId: str
 		CFrame = barnCF * CFrame.new(width / 2 - 5, height / 2 + 1, length / 2 - 1),
 		Color = Color3.fromRGB(120, 42, 34),
 		Material = Enum.Material.WoodPlanks,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 
-	-- Barn Roof (A-Frame Peak)
-	local roofSlope = 16
 	makePart({
 		Name = "RoofLeft",
 		Size = Vector3.new(width / 2 + 3, 2, length + 4),
 		CFrame = barnCF * CFrame.new(-width / 4, height + 4, 0) * CFrame.Angles(0, 0, math.rad(-25)),
 		Color = Color3.fromRGB(55, 30, 25),
 		Material = Enum.Material.CorrodedMetal,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 	makePart({
@@ -848,10 +1157,10 @@ local function buildRusticBarn(position: Vector3, headingDeg: number, carId: str
 		CFrame = barnCF * CFrame.new(width / 4, height + 4, 0) * CFrame.Angles(0, 0, math.rad(25)),
 		Color = Color3.fromRGB(55, 30, 25),
 		Material = Enum.Material.CorrodedMetal,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 
-	-- Interior Barn Spot for the Barn Find Vehicle
 	local spot = makePart({
 		Name = "BarnSpot",
 		Size = Vector3.new(12, 1, 20),
@@ -865,152 +1174,35 @@ local function buildRusticBarn(position: Vector3, headingDeg: number, carId: str
 	spot:SetAttribute("Car", carId)
 	CollectionService:AddTag(spot, BARN_SPOT_TAG)
 
-	-- Access dirt driveway connecting back towards the highway
+	-- Driveway connecting to the highway corridor
 	local roadDir = -math.sign(position.X)
 	makePart({
 		Name = "BarnDriveway",
-		Size = Vector3.new(18, 0.4, 70),
-		CFrame = CFrame.new(position.X + roadDir * 35, 0.2, position.Z),
+		Size = Vector3.new(20, 0.4, 75),
+		CFrame = CFrame.new(position.X + roadDir * 37.5, 0.4, position.Z),
 		Color = Color3.fromRGB(95, 78, 62),
 		Material = Enum.Material.Ground,
+		CanCollide = true,
 		Parent = barnModel,
 	})
 end
 
-local function buildCentralDealershipAndGarage(mapFolder: Folder)
-	local hubFolder = Instance.new("Folder")
-	hubFolder.Name = "CentralPlaza"
-	hubFolder.Parent = mapFolder
-
-	-- Main Plaza Esplanade
-	makePart({
-		Name = "PlazaEsplanade",
-		Size = Vector3.new(180, 1.2, 160),
-		CFrame = CFrame.new(0, 0.6, 60),
-		Color = Color3.fromRGB(48, 52, 60),
-		Material = Enum.Material.Concrete,
-		Parent = hubFolder,
-	})
-
-	-- Dealership Showroom Pavilion
-	local showCF = CFrame.new(0, 1, 0)
-	makePart({
-		Name = "ShowroomFloor",
-		Size = Vector3.new(80, 2, 60),
-		CFrame = showCF * CFrame.new(0, 1, 0),
-		Color = Color3.fromRGB(240, 242, 245),
-		Material = Enum.Material.SmoothPlastic,
-		Parent = hubFolder,
-	})
-	makePart({
-		Name = "ShowroomGlassRoof",
-		Size = Vector3.new(84, 1.5, 64),
-		CFrame = showCF * CFrame.new(0, 20, 0),
-		Color = Color3.fromRGB(140, 200, 240),
-		Material = Enum.Material.Glass,
-		Transparency = 0.5,
-		Parent = hubFolder,
-	})
-
-	-- Showroom Neon Header
-	local header = makePart({
-		Name = "DealershipSign",
-		Size = Vector3.new(48, 5, 2),
-		CFrame = showCF * CFrame.new(0, 22.5, 30),
-		Color = Color3.fromRGB(0, 160, 255),
-		Material = Enum.Material.Neon,
-		Parent = hubFolder,
-	})
-	local hGui = Instance.new("SurfaceGui")
-	hGui.Name = "HeaderGui"
-	hGui.Face = Enum.NormalId.Front
-	hGui.CanvasSize = Vector2.new(600, 80)
-	hGui.Parent = header
-	local hLabel = Instance.new("TextLabel")
-	hLabel.Size = UDim2.fromScale(1, 1)
-	hLabel.BackgroundTransparency = 1
-	hLabel.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
-	hLabel.Text = "★ CENTRAL MOTORS DEALERSHIP ★"
-	hLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-	hLabel.TextSize = 26
-	hLabel.Parent = hGui
-
-	-- Restoration Garage Workshop Building
-	local garageCF = CFrame.new(90, 1, 50)
-	makePart({
-		Name = "GarageBuilding",
-		Size = Vector3.new(50, 20, 60),
-		CFrame = garageCF * CFrame.new(0, 10, 0),
-		Color = Color3.fromRGB(65, 70, 80),
-		Material = Enum.Material.Concrete,
-		Parent = hubFolder,
-	})
-
-	-- Restoration Garage Sign
-	local gSign = makePart({
-		Name = "GarageSign",
-		Size = Vector3.new(34, 4, 1.5),
-		CFrame = garageCF * CFrame.new(0, 22, -29),
-		Color = Color3.fromRGB(255, 140, 0),
-		Material = Enum.Material.Neon,
-		Parent = hubFolder,
-	})
-	local gGui = Instance.new("SurfaceGui")
-	gGui.Name = "GarageGui"
-	gGui.Face = Enum.NormalId.Back
-	gGui.CanvasSize = Vector2.new(600, 80)
-	gGui.Parent = gSign
-	local gLabel = Instance.new("TextLabel")
-	gLabel.Size = UDim2.fromScale(1, 1)
-	gLabel.BackgroundTransparency = 1
-	gLabel.FontFace = Font.fromEnum(Enum.Font.GothamBlack)
-	gLabel.Text = "RESTORATION WORKSHOP & DROP-OFF"
-	gLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-	gLabel.TextSize = 24
-	gLabel.Parent = gGui
-
-	-- Drop-Off Zone Pad (Tagged `GarageDropOff` for BarnService)
-	local dropOffPad = makePart({
-		Name = "GarageDropOffZone",
-		Size = Vector3.new(24, 0.4, 28),
-		CFrame = CFrame.new(90, 1.2, 10),
-		Color = Color3.fromRGB(255, 140, 0),
-		Material = Enum.Material.Neon,
-		CanCollide = false,
-		Parent = hubFolder,
-	})
-	CollectionService:AddTag(dropOffPad, DROP_OFF_TAG)
-
-	-- Visual drop-off chevron floor stripes
-	for s = -10, 10, 5 do
-		makePart({
-			Name = "DropOffStripe",
-			Size = Vector3.new(20, 0.1, 2),
-			CFrame = CFrame.new(90, 1.45, 10 + s) * CFrame.Angles(0, math.rad(25), 0),
-			Color = Color3.fromRGB(25, 25, 25),
-			Material = Enum.Material.SmoothPlastic,
-			CanCollide = false,
-			Parent = hubFolder,
-		})
-	end
-end
-
 -- ============================================================================
--- MAIN WORLD BUILD ENTRY POINT
+-- MAIN ENTRY POINT
 -- ============================================================================
 
 function WorldService.start()
 	local mapFolder = getWorldFolder()
 	mapFolder:ClearAllChildren()
 
-	-- Clean up legacy baseplate to prevent z-fighting or gap conflicts
+	-- Clean up legacy baseplate to prevent z-fighting or gaps
 	local legacyBaseplate = Workspace:FindFirstChild("Baseplate")
 	if legacyBaseplate and legacyBaseplate:IsA("BasePart") then
 		legacyBaseplate.Transparency = 1
 		legacyBaseplate.CanCollide = false
 	end
 
-	-- Clean up any legacy manual garage models placed directly in Workspace
+	-- Clean up legacy manual garage models in Workspace
 	for _, child in Workspace:GetChildren() do
 		if child:IsA("Model") and (child.Name == "RestorationGarage" or child.Name == "Restoration Garage") then
 			child:Destroy()
@@ -1018,19 +1210,19 @@ function WorldService.start()
 	end
 
 	generateBiomeTerrain(mapFolder)
+	generateCrescentGaragesAndDriveway(mapFolder)
 	generateStraightHighway(mapFolder)
 	generateHighwayObstacles(mapFolder)
 	generateBiomeFoliage(mapFolder)
-	buildCentralDealershipAndGarage(mapFolder)
 
-	-- Build barns in the 4 outer biomes
+	-- Build barns in each biome along the linear highway run
 	for biomeKey, biome in WorldConfig.Biomes do
 		if biome.BarnSpot then
 			buildRusticBarn(biome.BarnSpot, biome.BarnHeading or 0, biome.CarReward or "Porsche", mapFolder)
 		end
 	end
 
-	print("[WorldService] Expansive procedural world generated with 5 biomes, straight highways, obstacles, and barns.")
+	print("[WorldService] Generated crescent player garages, merge driveway, and linear highway run (Z: 250 -> 4600) with 0 void gaps.")
 end
 
 return WorldService

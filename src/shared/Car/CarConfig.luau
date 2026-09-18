@@ -102,12 +102,12 @@ CarConfig.Driving = {
 }
 
 -- Where cars go when Workspace.Cars has no stand-ins placed in Studio (see
--- CarService.placeInStudio). Each CFrame is a car-space origin; it is dropped
--- onto the floor under it, so the height only has to be roughly right. These
--- are the middle two display pads in the dealership.
+-- CarService.placeInStudio). Spawns are positioned inside the crescent garage bays.
 CarConfig.Spawns = {
-	{ Car = "Porsche", CFrame = CFrame.new(-15, 2, 80) },
-	{ Car = "Porsche", CFrame = CFrame.new(15, 2, 80) },
+	{ Car = "Porsche", CFrame = CFrame.lookAt(Vector3.new(-22, 2, -15), Vector3.new(0, 2, 80)) },
+	{ Car = "Porsche", CFrame = CFrame.lookAt(Vector3.new(22, 2, -15), Vector3.new(0, 2, 80)) },
+	{ Car = "Porsche", CFrame = CFrame.lookAt(Vector3.new(-60, 2, 5), Vector3.new(0, 2, 80)) },
+	{ Car = "Porsche", CFrame = CFrame.lookAt(Vector3.new(60, 2, 5), Vector3.new(0, 2, 80)) },
 }
 
 CarConfig.Reset = {
@@ -116,8 +116,8 @@ CarConfig.Reset = {
 	MinHeight = -50, -- fell off the world
 }
 
--- Target CFrame for the main driving / playing area
-CarConfig.PlayingArea = CFrame.new(0, 3, 130)
+-- Target CFrame for the main driving / playing area: at the beginning of the linear highway run
+CarConfig.PlayingArea = CFrame.lookAt(Vector3.new(0, 3, 260), Vector3.new(0, 3, 350))
 
 --[[
 	The conditions a car can be built in, besides "Restored" -- the car as its
