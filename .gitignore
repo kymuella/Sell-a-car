@@ -13,3 +13,6 @@ sourcemap.json
 
 # Claude Code local settings and worktrees
 /.claude/
+
+# macOS folder metadata
+.DS_Store
